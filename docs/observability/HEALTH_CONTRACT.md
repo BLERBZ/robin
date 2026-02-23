@@ -1,0 +1,28 @@
+# Health Contract
+
+Kait Intelligence exposes two different concepts:
+
+- Liveness: "process is up"
+- Readiness: "system is usable and loops are healthy"
+
+## kaitd
+
+- `GET /health`
+  - Purpose: liveness
+  - Expected: HTTP 200 with plain body `ok`
+
+- `GET /status`
+  - Purpose: readiness + pipeline signal
+  - Expected: HTTP 200 JSON with:
+    - `ok: true`
+    - `now` (unix seconds)
+    - `port`
+    - `bridge_worker.last_heartbeat`
+    - `bridge_worker.pattern_backlog`
+    - `bridge_worker.validation_backlog`
+    - `pipeline` (when available)
+
+## Observability
+
+See `docs/OBSIDIAN_OBSERVATORY_GUIDE.md` for Observatory setup. Kait Pulse serves web endpoints on port 8765.
+

@@ -1,0 +1,12 @@
+{
+  "homeserver": "https://matrix.org",
+  "user_id": "@kait-intel:matrix.org",
+  "device_name": "kait-intel",
+  "sync_timeout_ms": 30000,
+  "auto_join_rooms": true,
+  "auto_trust_devices": true,
+  "message_type": "m.notice",
+  "reconnect_max_attempts": 10,
+  "reconnect_base_delay_s": 1,
+  "reconnect_max_delay_s": 300
+}

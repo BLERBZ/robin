@@ -1,0 +1,132 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kait-intel"
+version = "0.1.1"
+description = "Self-evolving intelligence layer for AI agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "Vibeship", email = "hello@vibeship.co"}
+]
+keywords = [
+    "ai",
+    "agents",
+    "learning",
+    "cognitive",
+    "self-improvement",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "requests>=2.28.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "pip-audit>=2.7.0",
+]
+mind = [
+    "vibeship-mind>=0.1.0",
+]
+embeddings = [
+    "fastembed>=0.3.0",
+]
+services = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "pydantic>=2.7.0",
+]
+sidekick = [
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+]
+gui = [
+    "PyQt6>=6.5.0",
+]
+tts = [
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.0",
+    "piper-tts>=1.2.0",
+    "piper-phonemize>=1.1.0",
+    "onnxruntime>=1.16.0",
+]
+tts-cloud = [
+    "elevenlabs>=1.0.0",
+    "openai>=1.0.0",
+]
+browser = [
+    "browser-use>=0.11.0",
+]
+claude = [
+    "anthropic>=0.40.0",
+]
+matrix = [
+    "matrix-nio[e2e]>=0.25.0",
+    "aiofiles>=23.0",
+]
+file_processing = [
+    "PyPDF2>=3.0.0",
+    "python-docx>=0.8.11",
+    "openpyxl>=3.1.0",
+    "pytesseract>=0.3.10",
+    "opencv-python-headless>=4.8.0",
+    "pydub>=0.25.0",
+    "striprtf>=0.0.26",
+]
+
+[project.urls]
+Homepage = "https://vibeship.co"
+Documentation = "https://docs.vibeship.co/kait"
+Repository = "https://github.com/vibeforge1111/kait-intel"
+
+[project.scripts]
+kait = "kait.cli:main"
+kait-sync = "lib.context_sync:main"
+
+[tool.setuptools]
+py-modules = ["kaitd", "bridge_worker", "kait_watchdog", "matrix_worker"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lib*", "hooks*", "kait*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.yaml", "*.json"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires live local Kait services or persisted state",
+]

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Usage: ./start kait [options]
+#   Launches the Kait AI sidekick in terminal mode.
+#   Background services (kaitd, bridge, pulse, scheduler, watchdog)
+#   start automatically — no extra terminals needed.
+#
+#   ./start kait                      # Terminal mode (interactive)
+#   ./start gui                       # GUI mode (PyQt dark UI)
+#   ./start kait --tts-backend elevenlabs  # Use ElevenLabs TTS
+#   ./start kait --no-tts             # Disable TTS
+#   ./start kait --no-services        # Skip background services
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Activate venv if not already in one
+if [ -z "${VIRTUAL_ENV:-}" ] && [ -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
+    source "$SCRIPT_DIR/.venv/bin/activate"
+fi
+
+# Use venv python if available, else find python3
+if [ -x "$SCRIPT_DIR/.venv/bin/python3" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python3"
+elif command -v python3 &>/dev/null; then
+    PYTHON="python3"
+else
+    echo "Error: python3 not found. Install Python 3.10+ or create a .venv"
+    exit 1
+fi
+
+case "${1:-}" in
+    kait)
+        shift
+        exec "$PYTHON" "$SCRIPT_DIR/kait_ai_sidekick.py" "$@"
+        ;;
+    gui)
+        shift || true
+        exec "$PYTHON" "$SCRIPT_DIR/kait_sidekick.py" "$@"
+        ;;
+    "")
+        echo "Usage:"
+        echo "  start kait [options]   Terminal sidekick mode"
+        echo "  start gui  [options]   GUI sidekick mode (PyQt)"
+        echo ""
+        echo "Terminal options:"
+        echo "  --tts-backend <name>   TTS backend: auto|elevenlabs|openai|piper|say"
+        echo "  --voice <name>         TTS voice name/ID"
+        echo "  --no-tts               Disable text-to-speech"
+        echo "  --no-services          Skip background services"
+        echo "  --stop-services-on-exit  Stop services on exit"
+        echo "  --daemon               Run in daemon mode"
+        echo "  --status               Show evolution status"
+        echo "  --check                Run pre-flight diagnostics"
+        exit 1
+        ;;
+    *)
+        echo "Unknown target: $1"
+        echo "Usage: start kait|gui [options]"
+        exit 1
+        ;;
+esac
