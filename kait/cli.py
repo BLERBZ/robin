@@ -2567,6 +2567,259 @@ def cmd_learn(args):
         print(f"Synced: {stats['synced']}, Queued: {stats['queued']}")
 
 
+# ─── OS Sidekick Command Handlers ─────────────────────────────────
+
+
+def cmd_os(args):
+    """Handle OS project management commands."""
+    os_cmd = getattr(args, "os_cmd", None)
+    if not os_cmd:
+        print("\n  Kait OS Sidekick — Open Source Project Management")
+        print("  Usage: kait os <command>\n")
+        print("  Commands:")
+        print("    new      Create a new OS project")
+        print("    status   Show project status")
+        print("    release  Create a release")
+        print("    health   Run health check")
+        print("    learn    Run learning cycle")
+        print("    promote  Generate promotion materials")
+        return
+
+    if os_cmd == "new":
+        from lib.os_project_manager import get_os_project_manager, RepoVisibility
+        mgr = get_os_project_manager()
+        visibility = RepoVisibility.PRIVATE if getattr(args, "private", False) else RepoVisibility.PUBLIC
+        project = mgr.create_project(
+            slug=args.slug,
+            name=getattr(args, "name", None),
+            description=getattr(args, "description", ""),
+            visibility=visibility,
+        )
+        print(f"\n  Project created: {project.name}")
+        print(f"  Slug: {project.slug}")
+        print(f"  Phase: {project.phase.value}")
+        print(f"  URL: {project.repo_url}")
+        print(f"  Version: {project.current_version}\n")
+
+    elif os_cmd == "status":
+        from lib.os_project_manager import get_os_project_manager
+        mgr = get_os_project_manager()
+        slug = getattr(args, "slug", None)
+        if slug:
+            status = mgr.get_project_status(slug)
+            if "error" in status:
+                print(f"\n  Error: {status['error']}\n")
+                return
+            print(f"\n  Project: {status['name']}")
+            print(f"  Phase: {status['phase']}")
+            print(f"  Health: {status['health']}")
+            print(f"  Version: {status['current_version']}")
+            if status.get("github_stats"):
+                gs = status["github_stats"]
+                print(f"  Stars: {gs.get('stars', 0)} | Forks: {gs.get('forks', 0)}")
+            if status.get("open_issues") is not None:
+                print(f"  Open Issues: {status['open_issues']}")
+            if status.get("open_prs") is not None:
+                print(f"  Open PRs: {status['open_prs']}")
+            print()
+        else:
+            projects = mgr.list_projects()
+            if not projects:
+                print("\n  No OS projects found. Use 'kait os new <slug>' to create one.\n")
+                return
+            print(f"\n  BLERBZ OS Projects ({len(projects)}):")
+            for p in projects:
+                print(f"    {p.slug:<20} {p.phase.value:<15} v{p.current_version}")
+            print()
+
+    elif os_cmd == "release":
+        from lib.release_pipeline import get_release_pipeline, BumpType
+        pipeline = get_release_pipeline()
+        bump = BumpType(args.bump) if getattr(args, "bump", None) else None
+        prep = pipeline.prepare_release(args.slug, bump)
+        print(f"\n  Release: {args.slug}")
+        print(f"  Version: v{prep.current_version} -> v{prep.next_version}")
+        print(f"  Commits: {len(prep.commits)}")
+        if getattr(args, "dry_run", False):
+            print(f"  Status: DRY RUN (not executed)")
+            print(f"\n  Changelog:\n{prep.changelog_entry}")
+        else:
+            results = pipeline.execute_release(prep)
+            print(f"  Status: {results.get('status', 'unknown')}")
+            if results.get("release_url"):
+                print(f"  URL: {results['release_url']}")
+        print()
+
+    elif os_cmd == "health":
+        from lib.os_project_manager import get_os_project_manager
+        mgr = get_os_project_manager()
+        checks = mgr.health_check(args.slug)
+        print(f"\n  Health Check: {args.slug}")
+        print(f"  Score: {checks.get('score', 'N/A')}")
+        print(f"  Health: {checks.get('health', 'unknown')}")
+        for key, val in checks.items():
+            if key.startswith("has_"):
+                label = key.replace("has_", "").replace("_", " ").title()
+                status = "Yes" if val else "No"
+                print(f"    {label}: {status}")
+        print()
+
+    elif os_cmd == "learn":
+        from lib.os_learning import get_os_learning
+        engine = get_os_learning()
+        slug = getattr(args, "slug", None)
+        if slug:
+            insights = engine.learn_from_project(slug)
+            print(f"\n  Learning from: {slug}")
+            print(f"  New insights: {len(insights)}")
+            for i in insights:
+                print(f"    [{i.domain.value}] {i.title}")
+            print()
+        else:
+            report = engine.get_mastery_report()
+            print(f"\n  OS Mastery Report")
+            print(f"  Overall Level: {report['overall_level']}")
+            print(f"  Overall Score: {report['overall_score']}%")
+            print(f"  Total Insights: {report['total_insights']}")
+            print(f"\n  Domains:")
+            for key, domain in report["domains"].items():
+                print(f"    {key:<20} {domain['level']:<12} {domain['score']}/100")
+            print()
+
+    elif os_cmd == "promote":
+        from lib.os_marketing import get_os_marketing
+        marketing = get_os_marketing()
+        campaign_type = getattr(args, "type", "launch")
+        if campaign_type == "launch":
+            materials = marketing.generate_launch_materials(args.slug)
+        else:
+            materials = marketing.generate_launch_materials(args.slug)
+        print(f"\n  Generated {len(materials)} marketing materials for: {args.slug}")
+        for m in materials:
+            print(f"    [{m.content_type.value}] {m.title}")
+        print(f"\n  Content saved to ~/.kait/os_marketing/content/")
+        print()
+
+
+def cmd_robin(args):
+    """Handle Robin sync commands."""
+    robin_cmd = getattr(args, "robin_cmd", None)
+    if not robin_cmd:
+        print("\n  Robin — BLERBZ's Own Open Source Sidekick")
+        print("  Usage: kait robin <command>\n")
+        print("  Commands:")
+        print("    init      Initialize Robin repository")
+        print("    sync      Sync Kait to Robin")
+        print("    status    Show sync status")
+        print("    validate  Validate sync state")
+        return
+
+    if robin_cmd == "init":
+        from lib.robin_sync import get_robin_sync
+        sync = get_robin_sync()
+        result = sync.initialize_robin()
+        print(f"\n  Robin initialized!")
+        print(f"  Status: {result.get('status')}")
+        print(f"  URL: {result.get('repo_url')}")
+        print()
+
+    elif robin_cmd == "sync":
+        from lib.robin_sync import get_robin_sync
+        sync = get_robin_sync()
+        plan = sync.prepare_sync()
+        summary = plan.summary()
+        print(f"\n  Robin Sync Plan:")
+        print(f"  Files: {summary['total_files']}")
+        print(f"  Add: {summary['add']} | Update: {summary['update']} | Skip: {summary['skip']}")
+        if plan.items:
+            results = sync.execute_sync(plan)
+            print(f"\n  Sync Results:")
+            print(f"  Synced: {results['synced']}")
+            print(f"  Skipped: {results['skipped']}")
+            if results.get("errors"):
+                print(f"  Errors: {len(results['errors'])}")
+        else:
+            print(f"  No changes to sync.")
+        print()
+
+    elif robin_cmd == "status":
+        from lib.robin_sync import get_robin_sync
+        sync = get_robin_sync()
+        status = sync.get_status()
+        print(f"\n  Robin Sync Status:")
+        print(f"  Status: {status['status']}")
+        print(f"  Total Syncs: {status['total_syncs']}")
+        print(f"  Files Synced: {status['files_synced']}")
+        if status["last_sync_at"]:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(status["last_sync_at"], tz=timezone.utc)
+            print(f"  Last Sync: {dt.strftime('%Y-%m-%d %H:%M UTC')}")
+        else:
+            print(f"  Last Sync: Never")
+        print()
+
+    elif robin_cmd == "validate":
+        from lib.robin_sync import get_robin_sync
+        sync = get_robin_sync()
+        result = sync.validate_sync()
+        print(f"\n  Robin Validation:")
+        print(f"  In Sync: {'Yes' if result['in_sync'] else 'No'}")
+        for check, passed in result.get("checks", {}).items():
+            status = "Pass" if passed else "FAIL"
+            print(f"    {check}: {status}")
+        print()
+
+
+def cmd_gh(args):
+    """Handle GitHub operations commands."""
+    gh_cmd = getattr(args, "gh_cmd", None)
+    if not gh_cmd:
+        print("\n  Kait GitHub Operations")
+        print("  Usage: kait gh <command>\n")
+        print("  Commands:")
+        print("    health  Check GitHub API health")
+        print("    repos   List org repositories")
+        print("    rate    Show API rate limit")
+        return
+
+    if gh_cmd == "health":
+        from lib.github_ops import get_github_ops
+        gh = get_github_ops()
+        health = gh.health_check()
+        print(f"\n  GitHub API Health:")
+        print(f"  Status: {health.get('status')}")
+        print(f"  Org: {health.get('org')}")
+        user = health.get("user", {})
+        if user.get("valid"):
+            print(f"  User: {user.get('login')}")
+        else:
+            print(f"  Auth: {user.get('error', 'Not configured')}")
+        rate = health.get("rate_limit", {})
+        if rate:
+            print(f"  Rate: {rate.get('remaining')}/{rate.get('limit')}")
+        print()
+
+    elif gh_cmd == "repos":
+        from lib.github_ops import get_github_ops
+        gh = get_github_ops()
+        repos = gh.list_repos()
+        print(f"\n  BLERBZ Repositories ({len(repos)}):")
+        for r in repos:
+            stars = r.get("stargazers_count", 0)
+            lang = r.get("language", "")
+            print(f"    {r['name']:<30} {lang:<12} {stars} stars")
+        print()
+
+    elif gh_cmd == "rate":
+        from lib.github_ops import get_github_ops
+        gh = get_github_ops()
+        rate = gh.get_rate_status()
+        print(f"\n  GitHub API Rate Limit:")
+        print(f"  Remaining: {rate['remaining']}/{rate['limit']}")
+        print(f"  Reset In: {rate['reset_in_s']:.0f}s")
+        print()
+
+
 def main():
     _configure_output()
     parser = argparse.ArgumentParser(
@@ -3055,6 +3308,52 @@ Examples:
     chips_parser.add_argument("--phase", choices=["discovery", "prototype", "polish", "launch"],
                               help="Filter questions by phase (for questions)")
 
+    # ─── OS Sidekick Commands ─────────────────────────────────────
+
+    os_parser = subparsers.add_parser("os", help="Open Source project management (BLERBZ sidekick)")
+    os_sub = os_parser.add_subparsers(dest="os_cmd")
+
+    os_new = os_sub.add_parser("new", help="Create a new OS project")
+    os_new.add_argument("slug", help="Project slug (e.g., 'robin')")
+    os_new.add_argument("--name", default=None, help="Human-readable name")
+    os_new.add_argument("--description", "-d", default="", help="Project description")
+    os_new.add_argument("--private", action="store_true", help="Create as private repo")
+
+    os_status_p = os_sub.add_parser("status", help="Show OS project status")
+    os_status_p.add_argument("slug", nargs="?", default=None, help="Project slug (omit for all)")
+
+    os_release = os_sub.add_parser("release", help="Create a release")
+    os_release.add_argument("slug", help="Project slug")
+    os_release.add_argument("--bump", choices=["major", "minor", "patch"], default=None, help="Version bump type")
+    os_release.add_argument("--dry-run", action="store_true", help="Preview release without executing")
+
+    os_health = os_sub.add_parser("health", help="Run project health check")
+    os_health.add_argument("slug", help="Project slug")
+
+    os_learn = os_sub.add_parser("learn", help="Run learning cycle on a project")
+    os_learn.add_argument("slug", nargs="?", default=None, help="Project slug (omit for mastery report)")
+
+    os_promote = os_sub.add_parser("promote", help="Generate promotion materials")
+    os_promote.add_argument("slug", help="Project slug")
+    os_promote.add_argument("--type", choices=["launch", "release", "milestone"], default="launch", help="Campaign type")
+
+    # Robin commands
+    robin_parser = subparsers.add_parser("robin", help="Robin sync management")
+    robin_sub = robin_parser.add_subparsers(dest="robin_cmd")
+
+    robin_sub.add_parser("init", help="Initialize Robin repository")
+    robin_sub.add_parser("sync", help="Sync Kait to Robin")
+    robin_sub.add_parser("status", help="Show Robin sync status")
+    robin_sub.add_parser("validate", help="Validate Robin sync state")
+
+    # GitHub operations
+    gh_parser = subparsers.add_parser("gh", help="GitHub operations")
+    gh_sub = gh_parser.add_subparsers(dest="gh_cmd")
+
+    gh_health = gh_sub.add_parser("health", help="Check GitHub API health")
+    gh_repos = gh_sub.add_parser("repos", help="List org repositories")
+    gh_rate = gh_sub.add_parser("rate", help="Show API rate limit status")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -3112,6 +3411,9 @@ Examples:
         "memory-migrate": cmd_memory_migrate,
         "chips": cmd_chips,
         "project": None,
+        "os": None,
+        "robin": None,
+        "gh": None,
     }
 
     if args.command == "project":
@@ -3129,6 +3431,18 @@ Examples:
             cmd_project_phase(args)
         else:
             project_parser.print_help()
+        return
+
+    if args.command == "os":
+        cmd_os(args)
+        return
+
+    if args.command == "robin":
+        cmd_robin(args)
+        return
+
+    if args.command == "gh":
+        cmd_gh(args)
         return
 
     if args.command in commands:

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kait-intel"
 version = "0.1.1"
-description = "Self-evolving intelligence layer for AI agents"
+description = "Self-evolving intelligence layer for AI agents — OS Sidekick for BLERBZ"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -19,6 +19,10 @@ keywords = [
     "cognitive",
     "self-improvement",
     "llm",
+    "open-source",
+    "sidekick",
+    "blerbz",
+    "github",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

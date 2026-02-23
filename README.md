@@ -123,6 +123,38 @@ Windows: run `start_kait.bat` from the repo root.
 
 Lightweight mode (core only, no Pulse/watchdog): `kait up --lite`
 
+## OS Sidekick — Open Source Project Management
+
+Kait now serves as the **Open Source Sidekick for BLERBZ LLC**, managing the full lifecycle of open-source projects through GitHub.
+
+```bash
+# Create a new OS project
+kait os new my-project --description "A new open source tool"
+
+# Check project health
+kait os health my-project
+
+# Create a release (auto-detects version bump from commits)
+kait os release my-project
+
+# Generate promotion materials
+kait os promote my-project
+
+# Run learning cycle
+kait os learn my-project
+
+# Initialize Robin (BLERBZ's OS Sidekick mirror)
+kait robin init
+
+# Sync Kait → Robin
+kait robin sync
+
+# Check GitHub API status
+kait gh health
+```
+
+See [docs/OS_SIDEKICK.md](docs/OS_SIDEKICK.md) for full documentation.
+
 ## Connect Your Agent
 
 Kait works with any coding agent that supports hooks or event capture.
