@@ -1,36 +1,58 @@
 # Security Policy
 
+## Supported Versions
+
+| Version | Supported          |
+| ------- | ------------------ |
+| latest  | :white_check_mark: |
+| < 1.0   | :white_check_mark: |
+
 ## Reporting a Vulnerability
 
-If you find a security vulnerability or safety-critical issue, please submit a **Pull Request** with:
+If you discover a security vulnerability in Robin, please report it responsibly:
 
-- A clear description of the issue and its impact
-- The affected component(s)
-- Minimal reproduction steps
-- Your suggested fix
+1. **Do not** open a public GitHub issue for security vulnerabilities
+2. Email security concerns to the maintainers via GitHub's private vulnerability reporting
+3. Include:
+   - Description of the vulnerability
+   - Steps to reproduce
+   - Potential impact assessment
+   - Suggested fix (if any)
 
-For sensitive vulnerabilities that should not be disclosed publicly before a fix is available, use [GitHub's private vulnerability reporting](https://github.com/vibeforge1111/kait-intel/security/advisories/new) or email `security@vibeship.co`.
+### Response Timeline
+
+- **Acknowledgment**: Within 48 hours
+- **Assessment**: Within 5 business days
+- **Fix timeline**: Depending on severity
+  - Critical: 24-48 hours
+  - High: 1 week
+  - Medium: 2 weeks
+  - Low: Next release
+
+## Security Updates
+
+- Security updates are released as patch versions
+- Announced in GitHub releases with `[SECURITY]` prefix
+- Critical updates trigger immediate release
+
+## Security Best Practices
+
+When using Robin:
+
+- Keep your Python environment updated
+- Use virtual environments
+- Never commit `.env` files or API keys
+- Review the `pip-audit` output in CI
+- Use the latest release for production
 
 ## Scope
 
-This repo handles:
-- Local event capture (Claude Code hooks)
-- Processing and memory/distillation loops (Kait / EIDOS)
-- Local dashboards and notifications
+This security policy covers:
+- The Robin codebase and its direct dependencies
+- Official Robin releases and distributions
+- The Robin GitHub repository
 
-Security-sensitive areas:
-- Hook inputs (prompt injection via tool metadata)
-- Any code execution surfaces (shell/tool runners)
-- Any network clients (Mind bridge, notify/wake endpoints)
-- Any persisted files under `~/.kait/`
-
-## Response Timeline
-
-- Acknowledge: within 72 hours
-- Initial assessment: within 7 days
-- Patch target for critical issues: 14 days (best-effort)
-
-## Hard Rules
-
-- Never ask reporters to publish exploit details before a fix is available.
-- Never request real secrets from reporters.
+This policy does not cover:
+- Third-party plugins or extensions
+- User-modified versions of Robin
+- Upstream dependencies (report those to their maintainers)

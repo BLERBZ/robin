@@ -1,68 +1,117 @@
-# Contributing
+# Contributing to Robin
 
-## Scope
+Thank you for your interest in contributing to Robin! This document provides
+guidelines and instructions for contributing.
 
-This project is a dual-use autonomy/memory system. Contributions are welcome, but we keep safety and observability first.
+## Code of Conduct
 
-## Quick Start for Contributors
+This project adheres to our [Code of Conduct](CODE_OF_CONDUCT.md). By participating,
+you are expected to uphold this code.
 
-1. Fork the repo and clone:
+## How to Contribute
+
+### Reporting Bugs
+
+1. Check existing issues to avoid duplicates
+2. Use the bug report template when creating a new issue
+3. Include steps to reproduce, expected behavior, and actual behavior
+4. Include your Python version and OS
+
+### Suggesting Enhancements
+
+1. Check existing issues and discussions first
+2. Use the feature request template
+3. Describe the problem you're trying to solve
+
+### Pull Requests
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Make your changes following our coding standards
+4. Write or update tests as needed
+5. Run the test suite: `pytest`
+6. Run the linter: `ruff check .`
+7. Commit with clear messages: `git commit -m "feat: your feature description"`
+8. Push and create a Pull Request
+
+### Commit Message Format
+
+We follow conventional commits:
+
+- `feat:` New feature
+- `fix:` Bug fix
+- `docs:` Documentation changes
+- `refactor:` Code refactoring
+- `test:` Adding or updating tests
+- `chore:` Maintenance tasks
+
+### Coding Standards
+
+- Follow PEP 8 for Python code
+- Use type hints where possible
+- Write docstrings for public functions
+- Keep functions focused and small
+- Write tests for new functionality
+- Line length: 100 characters max
+
+## Development Setup
 
 ```bash
-git clone https://github.com/vibeforge1111/kait-intel
-cd kait-intel
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/robin.git
+cd robin
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Run linter
+ruff check .
+
+# Run formatter
+black .
 ```
 
-2. Create a branch:
+## Project Structure
 
-```bash
-git checkout -b your-change
+```
+robin/
+├── lib/           # Core modules (200+ Python files)
+├── kait/          # CLI interface
+├── adapters/      # Input integrations
+├── config/        # Configuration templates
+├── tests/         # Test suite (120+ test files)
+├── docs/          # Documentation
+├── scripts/       # Utility scripts
+├── hooks/         # Integration hooks
+├── templates/     # Template files
+└── .github/       # CI/CD workflows
 ```
 
-3. Install dependencies:
+## Review Process
 
-```bash
-python -m pip install -e .[dev]
-```
+1. All PRs require at least one review
+2. CI checks must pass
+3. Code coverage should not decrease
+4. Documentation must be updated if applicable
 
-4. Read the onboarding docs:
-- `docs/GETTING_STARTED_5_MIN.md`
-- `docs/QUICKSTART.md`
-- `docs/ONBOARDING.md`
+## Getting Help
 
-## What to contribute
+- Open a [Discussion](https://github.com/blerbz/robin/discussions) for questions
+- Check the [Documentation](docs/) for guides
+- Look at existing tests for usage examples
 
-- Prefer small, reversible changes with measurable intent.
-- Include docs updates for behavior changes.
-- Include tests for rule, scoring, and safety-path edits when possible.
+## Recognition
 
-## Expected PR flow
+All contributors are valued! We maintain a contributors list and highlight
+significant contributions in release notes.
 
-1. Open an issue or include a short problem statement in the PR.
-2. Keep changes scoped to one clear outcome.
-3. Include what changed and how to verify it.
-4. Note safety impact in the description (if relevant).
+Thank you for helping make Robin better!
 
-## Development guardrails
-
-## What We Will Not Accept
-
-- Changes whose primary purpose is bypassing safety guardrails or increasing high-risk autonomy without clear, reviewable controls.
-- "Stealth" behavior: hidden capabilities, obfuscated backdoors, or surprise network actions.
-- Features that materially increase misuse risk without a written threat model, tests, and a safe default posture.
-
-## What We Prefer
-
-- Smaller, measurable changes with tests.
-- Least-privilege capability design (typed tools, deny-by-default).
-- Security fixes, guardrail hardening, and monitoring improvements.
-- Documentation that makes safety and operational boundaries explicit.
-
-## Security
-
-If you find a vulnerability or a safety-critical issue, follow `SECURITY.md`.
-
-## Good to know
-
-- We intentionally avoid changing defaults that weaken safety or telemetry for convenience.
-- Prefer deterministic behavior on critical paths unless you can show objective improvement.
+— The BLERBZ Team
