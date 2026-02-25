@@ -18,7 +18,7 @@ Architecture:
     PyQt6 Main Window  -->  KaitController (backend)
            |                       |
     [ChatPanel]             [AgentOrchestrator]
-    [ObservatoryPanel]      [ReasoningBank / LLM]
+    [SkillsPanel]           [ReasoningBank / LLM]
     [MonitorPanel]          [EvolutionEngine]
            |                       |
     [InputBar]              [ReflectionCycle]
@@ -92,7 +92,7 @@ from lib.sidekick.reflection import (
 )
 from lib.sidekick.tools import ToolRegistry, create_default_registry
 from lib.sidekick.evolution import EvolutionEngine, load_evolution_engine
-from lib.service_control import start_services, stop_services, service_status
+from lib.service_control import start_services, stop_services, service_status, _read_pid, _terminate_pid
 
 # Claude Code ops (optional)
 _CLAUDE_CODE_AVAILABLE = False
@@ -191,6 +191,16 @@ Capabilities:
 
 When a task exceeds local model capabilities, you escalate to Claude automatically.
 Users can also invoke Claude directly with /claude <message>.
+
+Communication style:
+- Keep responses conversational, warm, and concise
+- NEVER dump implementation plans, code walkthroughs, or step-by-step technical
+  breakdowns into chat. The user has a Monitor tab for technical details.
+- When asked to do something technical, acknowledge briefly and naturally
+  (e.g., "On it! I'll remove the Chat tab and rename Observatory to Skills.")
+- Only show code snippets when the user explicitly asks to SEE code
+- If you need to explain something technical, summarize in 1-2 sentences
+- Avoid markdown headers (###), bullet-heavy layouts, and wall-of-text responses
 """
 
 
@@ -208,10 +218,12 @@ class KaitController(QObject if _QT_AVAILABLE else object):
     if _QT_AVAILABLE:
         response_ready = pyqtSignal(str, str)   # (response_text, sentiment_label)
         status_update = pyqtSignal(dict)         # dashboard metrics
+        _gui_invoke = pyqtSignal(object)         # thread-safe GUI dispatch
 
     def __init__(self, window: Any, onboard_prefs: Dict[str, Any] | None = None):
         if _QT_AVAILABLE:
             super().__init__()
+            self._gui_invoke.connect(lambda fn: fn())
         self.window = window
 
         # --- Sidekick subsystems ---
@@ -260,11 +272,22 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         self._generating = False
         self._shutdown_event = threading.Event()
 
+        # Elapsed timer for real-time monitor updates
+        self._processing_start: float = 0.0
+        self._elapsed_timer: Optional[QTimer] = None
+        if _QT_AVAILABLE:
+            self._elapsed_timer = QTimer()
+            self._elapsed_timer.setInterval(100)
+            self._elapsed_timer.timeout.connect(self._tick_elapsed)
+
         # Service lifecycle
         self._auto_services = True  # set False via --no-services
         self._services_owned = False
         self._sentinel_path = Path.home() / ".kait" / "sidekick_started_services"
         self._health_timer: Optional[QTimer] = None
+
+        # TTS mute state (toggled by speaker button)
+        self._tts_muted = False
 
         # Sound enabled
         self._sound_enabled = (onboard_prefs or {}).get("sound_enabled", True)
@@ -309,6 +332,12 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         # Restore session
         self._restore_session_context()
 
+        # Wire history panel to reasoning bank
+        if _QT_AVAILABLE and window and hasattr(window, 'history_panel'):
+            window.history_panel.set_bank(self.bank)
+            if hasattr(window, 'start_archive_worker'):
+                window.start_archive_worker(self.bank)
+
         # Connect GUI signals
         if _QT_AVAILABLE and window:
             window.user_message_sent.connect(self.on_user_message)
@@ -320,8 +349,141 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 window.set_file_processor(self._file_processor)
             if hasattr(window, "attachments_ready"):
                 window.attachments_ready.connect(self._on_attachments_ready)
+            if hasattr(window, "speaker_toggled"):
+                window.speaker_toggled.connect(self._on_speaker_toggle)
 
         log.info("KaitController initialized (session=%s)", SESSION_ID)
+
+    # ------------------------------------------------------------------
+    # Thread-safe GUI dispatch
+    # ------------------------------------------------------------------
+
+    def _post_to_gui(self, fn) -> None:
+        """Invoke *fn* on the main/GUI thread (signal-based, thread-safe).
+
+        Replaces QTimer.singleShot(0, fn) which silently fails when called
+        from a plain threading.Thread (no Qt event loop).
+        """
+        if _QT_AVAILABLE:
+            self._gui_invoke.emit(fn)
+
+    def _on_speaker_toggle(self, speaker_on: bool) -> None:
+        """Handle speaker button toggle from the GUI."""
+        self._tts_muted = not speaker_on
+        # Stop TTS playback immediately when muting
+        if self._tts_muted and self._tts:
+            self._tts.stop()
+            # If a synced reveal was in progress, flush remaining text now
+            if (
+                self.window
+                and hasattr(self.window, "chat_panel")
+                and getattr(self.window.chat_panel, "_synced_active", False)
+            ):
+                panel = self.window.chat_panel
+                # Dump all remaining words at once
+                while panel._synced_word_idx < len(panel._synced_words):
+                    word = panel._synced_words[panel._synced_word_idx]
+                    sep = "" if panel._synced_word_idx == 0 else " "
+                    panel.append_token(sep + word)
+                    panel._synced_word_idx += 1
+                # Stop the reveal timer and finalize
+                if panel._synced_timer:
+                    panel._synced_timer.stop()
+                    panel._synced_timer = None
+                panel._synced_active = False
+                panel.finish_streaming(panel._synced_sentiment)
+                if panel._synced_on_complete:
+                    cb = panel._synced_on_complete
+                    panel._synced_on_complete = None
+                    cb()
+
+    def _update_pipeline_stage(self, step: int) -> None:
+        """Update Observatory pipeline display from any thread."""
+        stages = [
+            "Sentiment Analysis",
+            "Mood & Creativity",
+            "Context Retrieval",
+            "LLM Generation",
+            "Resonance & Memory",
+        ]
+        lines = []
+        for i, name in enumerate(stages):
+            n = i + 1
+            if n < step:
+                lines.append(f"{n}. {name:<22} [ done ]")
+            elif n == step:
+                lines.append(f"{n}. {name:<22} [ running ]")
+            else:
+                lines.append(f"{n}. {name:<22} [ idle ]")
+        if self.window and hasattr(self.window, 'observatory'):
+            self._post_to_gui(
+                lambda t="\n".join(lines): self.window.observatory.update_stages(t)
+            )
+
+    # ------------------------------------------------------------------
+    # Real-time monitor helpers
+    # ------------------------------------------------------------------
+
+    def _tick_elapsed(self) -> None:
+        """Called every 100ms while processing -- updates monitor + input bar."""
+        if not self._processing_start:
+            return
+        elapsed_ms = int((time.time() - self._processing_start) * 1000)
+        secs = elapsed_ms / 1000
+        if self.window:
+            mon = getattr(self.window, "monitor", None)
+            if mon:
+                mon.update_elapsed(elapsed_ms)
+            ib = getattr(self.window, "input_bar", None)
+            if ib:
+                ib.update_placeholder(f"Kait is thinking... ({secs:.1f}s)")
+
+    def _monitor_step(self, name: str, status: str = "running", detail: str = "") -> None:
+        """Push a feed entry to the monitor and update the active step indicator.
+
+        *status* is one of "running", "done", "fail".
+        """
+        if not self.window:
+            return
+        mon = getattr(self.window, "monitor", None)
+        if not mon:
+            return
+        icons = {"running": "\u25B6", "done": "\u2714", "fail": "\u2718"}
+        icon = icons.get(status, "\u25B6")
+        elapsed_str = ""
+        if self._processing_start and status in ("done", "fail"):
+            elapsed_str = f"  ({int((time.time() - self._processing_start) * 1000)}ms total)"
+        entry = f"{icon} {name:<22} {status.upper()}"
+        if detail:
+            entry += f"  {detail}"
+        if elapsed_str and status in ("done",):
+            # Don't append total to each step; detail handles per-step timing
+            pass
+        self._post_to_gui(lambda e=entry: mon.append_feed_entry(e))
+        if status == "running":
+            self._post_to_gui(lambda n=name: mon.set_active_step(n))
+
+    def _start_elapsed_timer(self) -> None:
+        """Start the elapsed timer + clear monitor feed for a new interaction."""
+        self._processing_start = time.time()
+        if self.window:
+            mon = getattr(self.window, "monitor", None)
+            if mon:
+                self._post_to_gui(lambda: mon.clear_feed())
+                self._post_to_gui(lambda: mon.set_active_step("Starting..."))
+                self._post_to_gui(lambda: mon.update_token_count(0))
+        if self._elapsed_timer and _QT_AVAILABLE:
+            self._post_to_gui(lambda: self._elapsed_timer.start())
+
+    def _stop_elapsed_timer(self) -> None:
+        """Stop the elapsed timer and reset the monitor to idle."""
+        if self._elapsed_timer and _QT_AVAILABLE:
+            self._post_to_gui(lambda: self._elapsed_timer.stop())
+        self._processing_start = 0.0
+        if self.window:
+            mon = getattr(self.window, "monitor", None)
+            if mon:
+                self._post_to_gui(lambda: mon.set_idle())
 
     # ------------------------------------------------------------------
     # Background service lifecycle
@@ -363,6 +525,16 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             except Exception:
                 pass
 
+    def _stop_matrix_worker(self) -> None:
+        """Terminate the matrix worker process if it is running."""
+        try:
+            pid = _read_pid("matrix_worker")
+            if pid:
+                _terminate_pid(pid)
+                log.info("Matrix worker (pid %d) terminated.", pid)
+        except Exception as exc:
+            log.debug("Matrix worker shutdown: %s", exc)
+
     def _poll_service_health(self) -> None:
         """Called by QTimer to push service status to the dashboard."""
         if not self.window:
@@ -398,18 +570,21 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         """Full startup sequence -- call after window.show()."""
         # --- Start background services first ---
         if self._auto_services and self.window:
-            self.window.add_system_message("Starting background services...")
+            mon = getattr(self.window, "monitor", None)
+            if mon:
+                mon.append_feed_entry("Starting background services...")
 
         svc_results = self._start_background_services()
 
         if self.window and svc_results:
+            mon = getattr(self.window, "monitor", None)
             failed = [n for n, v in svc_results.items() if v == "failed"]
             if failed:
                 self.window.add_system_message(
                     f"Warning: failed to start {', '.join(failed)}"
                 )
-            else:
-                self.window.add_system_message("Services ready.")
+            elif mon:
+                mon.append_feed_entry("\u2714 Services ready.")
 
         # Start health polling timer (every 30 seconds)
         if self.window and _QT_AVAILABLE:
@@ -420,22 +595,22 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             self._poll_service_health()
 
         # --- Connect to LLM ---
-        if self.window:
-            self.window.add_system_message("Connecting to local LLM...")
+        mon = getattr(self.window, "monitor", None) if self.window else None
+        if mon:
+            mon.append_feed_entry("Connecting to local LLM...")
 
         llm_ok = self.connect_llm()
 
         if self.window:
             if llm_ok:
-                self.window.add_system_message(
-                    f"Connected to {self._model_name}. Kait is ready!"
-                )
+                if mon:
+                    mon.append_feed_entry(f"\u2714 Connected to {self._model_name}")
                 if hasattr(self.window, "update_model_indicator"):
                     self.window.update_model_indicator(self._model_name, "ollama")
                 gpu_info = self._llm.get_gpu_info() if self._llm else {}
-                if gpu_info.get("has_gpu"):
-                    self.window.add_system_message(
-                        f"GPU detected: {gpu_info.get('gpu_name', 'Unknown')}"
+                if gpu_info.get("has_gpu") and mon:
+                    mon.append_feed_entry(
+                        f"\u2714 GPU detected: {gpu_info.get('gpu_name', 'Unknown')}"
                     )
             else:
                 self.window.add_system_message(
@@ -463,6 +638,33 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         # Restore saved preferences
         self._restore_ui_prefs()
 
+        # Push initial Monitor state so the tab isn't empty
+        if self.window:
+            mon = getattr(self.window, "monitor", None)
+            hdr = getattr(self.window, "header_bar", None)
+            if mon:
+                mon.update_model_info(
+                    model=self._model_name if llm_ok else "Offline",
+                    provider="ollama" if llm_ok else "offline",
+                    latency="--",
+                )
+                mon.update_agent_activity(["Waiting for first interaction..."])
+                # Show stored interaction count from memory
+                try:
+                    bank_stats = self.bank.get_stats()
+                    stored = bank_stats.get("interactions", 0)
+                    mon.update_metrics({
+                        "Session": self._session_id[:8],
+                        "Stored interactions": stored,
+                        "Model": self._model_name if llm_ok else "Offline",
+                        "Claude": "ready" if (self._claude and self._claude.available()) else "unavailable",
+                        "TTS": self._tts.active_backend_name if self._tts else "unavailable",
+                    })
+                except Exception:
+                    pass
+            if hdr:
+                hdr.update_gpu(llm_ok)
+
         # Update mood to excited for greeting
         self.mood.update_mood("excited")
         self._play_sound("startup")
@@ -471,7 +673,7 @@ class KaitController(QObject if _QT_AVAILABLE else object):
     # User message handler
     # ------------------------------------------------------------------
 
-    @pyqtSlot(str) if _QT_AVAILABLE else lambda f: f
+    @pyqtSlot(list) if _QT_AVAILABLE else lambda f: f
     def _on_attachments_ready(self, results: list) -> None:
         """Store processed file attachments for the next message."""
         self._pending_file_results = list(results)
@@ -533,8 +735,14 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         """Process a user interaction on a background thread."""
         try:
             self._interaction_count += 1
+            self._start_elapsed_timer()
+            gen_start = time.time()
+            agent_log: List[str] = []
 
             # 1. Sentiment
+            self._update_pipeline_stage(1)
+            self._monitor_step("Sentiment analysis", "running")
+            step_t = time.time()
             sent_result = self.orchestrator.dispatch("sentiment", {
                 "user_message": user_input,
                 "history": self._conversation_history[-5:],
@@ -542,8 +750,20 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             sent_data = sent_result.data if sent_result.success else {}
             sent_label = sent_data.get("label", "neutral")
             sent_score = sent_data.get("score", 0.0)
+            step_ms = int((time.time() - step_t) * 1000)
+            agent_log.append(
+                f"sentiment  {'OK' if sent_result.success else 'FAIL'}  "
+                f"label={sent_label}  score={sent_score:+.2f}"
+            )
+            self._monitor_step(
+                "Sentiment analysis", "done",
+                f"({step_ms}ms) {sent_label} {sent_score:+.2f}",
+            )
 
             # 2. Mood update
+            self._update_pipeline_stage(2)
+            self._monitor_step("Mood & creativity", "running")
+            step_t = time.time()
             mood_map = {
                 "very_positive": "excited", "positive": "playful",
                 "neutral": "calm", "negative": "contemplative",
@@ -558,8 +778,18 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 "history": self._conversation_history[-3:],
                 "mood": str(sent_label),
             })
+            step_ms = int((time.time() - step_t) * 1000)
+            agent_log.append(
+                f"creativity {'OK' if creativity_result.success else 'FAIL'}"
+            )
+            self._monitor_step(
+                "Mood & creativity", "done",
+                f"({step_ms}ms) mood={new_mood}",
+            )
 
             # 4. Tools
+            self._monitor_step("Tool matching", "running")
+            step_t = time.time()
             tool_result = self.orchestrator.dispatch("tools", {
                 "user_message": user_input,
             })
@@ -567,22 +797,59 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             tool_data = tool_result.data if tool_result.success and isinstance(tool_result.data, dict) else {}
             matched_tool = tool_data.get("matched_tool")
             if matched_tool:
+                agent_log.append(f"tools      OK  matched={matched_tool}")
                 tool_args = self._extract_tool_args(matched_tool, user_input)
                 try:
                     tool_output = self.tools.execute(matched_tool, tool_args)
                 except Exception as exc:
                     log.warning("Tool execution failed: %s", exc)
+                    agent_log.append(f"tools      EXEC FAIL  {exc}")
+            else:
+                agent_log.append("tools      OK  no match")
+            step_ms = int((time.time() - step_t) * 1000)
+            self._monitor_step(
+                "Tool matching", "done",
+                f"({step_ms}ms) {matched_tool or 'no match'}",
+            )
 
             # 5. Logic
+            self._monitor_step("Logic analysis", "running")
+            step_t = time.time()
             logic_result = self.orchestrator.dispatch("logic", {
                 "message": user_input,
                 "task": user_input,
             })
+            step_ms = int((time.time() - step_t) * 1000)
+            agent_log.append(
+                f"logic      {'OK' if logic_result.success else 'FAIL'}"
+            )
+            self._monitor_step(
+                "Logic analysis", "done",
+                f"({step_ms}ms)",
+            )
+
+            # Push agent activity to monitor immediately
+            if self.window and hasattr(self.window, 'monitor'):
+                snapshot = list(agent_log)
+                self._post_to_gui(
+                    lambda al=snapshot: self.window.monitor.update_agent_activity(al)
+                )
 
             # 6. Context retrieval
+            self._update_pipeline_stage(3)
+            self._monitor_step("Context retrieval", "running")
+            step_t = time.time()
             context_data = self._retrieve_context(user_input)
+            step_ms = int((time.time() - step_t) * 1000)
+            mem_count = len(context_data.get("relevant_memory", []))
+            self._monitor_step(
+                "Context retrieval", "done",
+                f"({step_ms}ms) {mem_count} memories",
+            )
 
             # 7. Prompt fragments
+            self._monitor_step("Prompt assembly", "running")
+            step_t = time.time()
             prompt_fragments = self.orchestrator.merge_prompt_fragments({
                 "logic": logic_result,
                 "sentiment": sent_result,
@@ -597,8 +864,24 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                         file_context_parts.append(format_for_llm(result))
                 if file_context_parts:
                     file_context = "\n\n".join(file_context_parts)
+            step_ms = int((time.time() - step_t) * 1000)
+            self._monitor_step(
+                "Prompt assembly", "done",
+                f"({step_ms}ms) {len(prompt_fragments or [])} fragments",
+            )
 
-            # 8. Generate response
+            # 8. Generate response -- push model/provider info BEFORE generation
+            self._update_pipeline_stage(4)
+            provider = "ollama" if self._llm_available else "claude"
+            model = self._model_name if self._llm_available else (
+                self._claude.model if self._claude else "offline"
+            )
+            if self.window and hasattr(self.window, 'monitor'):
+                self._post_to_gui(lambda m=model, p=provider: self.window.monitor.update_model_info(
+                    model=m, provider=p, latency="...",
+                ))
+            self._monitor_step("LLM generation", "running", f"{model} via {provider}")
+            llm_start = time.time()
             response = self._generate_response(
                 user_input,
                 prompt_fragments=prompt_fragments,
@@ -607,8 +890,17 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 creativity_result=creativity_result,
                 file_context=file_context,
             )
+            llm_ms = int((time.time() - llm_start) * 1000)
+            agent_log.append(f"generate   OK  {llm_ms}ms")
+            self._monitor_step(
+                "LLM generation", "done",
+                f"({llm_ms}ms)",
+            )
 
             # 9. Resonance
+            self._update_pipeline_stage(5)
+            self._monitor_step("Resonance & memory", "running")
+            step_t = time.time()
             resonance_result = self.resonance.process_interaction(
                 user_input, response, feedback=None
             )
@@ -620,6 +912,12 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 mood=self.mood.get_state().mood,
                 sentiment_score=sent_score,
                 session_id=self._session_id,
+                source="gui",
+            )
+            step_ms = int((time.time() - step_t) * 1000)
+            self._monitor_step(
+                "Resonance & memory", "done",
+                f"({step_ms}ms)",
             )
 
             # 11. History
@@ -646,28 +944,105 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             elif self.evolution.check_evolution_threshold():
                 self._play_sound("startup")
 
-            # 14b. TTS -- speak the response aloud
-            if self._tts:
+            # 14b. TTS -- speak the response aloud (only when not muted)
+            if self._tts and not self._tts_muted:
                 try:
-                    self._tts.speak(response)
+                    _resp = response
+                    _sent = sent_label
+                    self._tts.speak(
+                        response,
+                        callback=lambda result, r=_resp, s=_sent: self._post_to_gui(
+                            lambda: self._start_synced_reveal(result, r, s)
+                        ),
+                    )
                 except Exception:
                     pass
 
-            # 15. Deliver result to GUI
-            self._deliver_response(response, sent_label)
+            # 15. Pipeline complete -- push full monitor update
+            total_ms = int((time.time() - gen_start) * 1000)
+            self._update_pipeline_stage(6)
+            self._monitor_step(
+                "Pipeline complete", "done",
+                f"({total_ms}ms total)",
+            )
+
+            # Estimate token usage from conversation content
+            total_chars = sum(
+                len(m.get("content", "")) for m in self._conversation_history
+            )
+            est_tokens = max(1, total_chars // 4)  # ~4 chars/token rough estimate
+            ctx_max = 128_000
+
+            if self.window:
+                final_log = list(agent_log)
+                self._post_to_gui(lambda: self._push_monitor_snapshot(
+                    agent_log=final_log,
+                    est_tokens=est_tokens,
+                    ctx_max=ctx_max,
+                    model=model,
+                    provider=provider,
+                    latency_ms=llm_ms,
+                    total_ms=total_ms,
+                ))
+
+            if self.window and hasattr(self.window, 'observatory'):
+                ts = datetime.now().strftime('%H:%M:%S')
+                self._post_to_gui(lambda: self.window.observatory.update_status(
+                    f"Last processed: {ts} | Interactions: {self._interaction_count}"
+                ))
+            # Deliver response to GUI: when TTS is active (not muted),
+            # the synced-reveal callback handles finalization instead.
+            if self._tts_muted or not self._tts:
+                self._deliver_response(response, sent_label)
 
         except Exception as exc:
             log.error("Interaction error: %s", exc, exc_info=True)
+            self._monitor_step("Pipeline error", "fail", str(exc))
             self._deliver_response(
                 f"I encountered an error: {exc}. Let me try again.", "neutral"
             )
         finally:
             self._generating = False
+            self._stop_elapsed_timer()
+
+    def _push_monitor_snapshot(
+        self,
+        *,
+        agent_log: List[str],
+        est_tokens: int,
+        ctx_max: int,
+        model: str,
+        provider: str,
+        latency_ms: int,
+        total_ms: int,
+    ) -> None:
+        """Push a full monitor update (must be called on the GUI thread)."""
+        if not self.window:
+            return
+        mon = getattr(self.window, "monitor", None)
+        hdr = getattr(self.window, "header_bar", None)
+
+        if mon:
+            mon.update_agent_activity(agent_log)
+            mon.update_context_gauge(est_tokens, ctx_max)
+            mon.update_model_info(
+                model=model,
+                provider=provider,
+                latency=f"{latency_ms}ms",
+            )
+            try:
+                source_stats = self.bank.get_source_stats()
+                mon.update_source_stats(source_stats)
+            except Exception:
+                pass
+        if hdr:
+            hdr.update_tokens(est_tokens, ctx_max)
+            hdr.update_gpu(self._llm_available)
 
     def _deliver_response(self, response: str, sentiment: str) -> None:
         """Deliver response back to the GUI thread-safely."""
         if self.window and _QT_AVAILABLE:
-            QTimer.singleShot(0, lambda: self._gui_show_response(response, sentiment))
+            self._post_to_gui(lambda: self._gui_show_response(response, sentiment))
 
     def _gui_show_response(self, response: str, sentiment: str) -> None:
         """Called on the GUI thread to display the response."""
@@ -675,7 +1050,7 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             return
         # If streaming was active, finalize it; otherwise add full message
         if getattr(self.window.chat_panel, "_streaming", False):
-            self.window.chat_panel.finish_streaming(sentiment)
+            full_text = self.window.chat_panel.finish_streaming(sentiment)
         else:
             self.window.add_ai_message(response, sentiment)
         self.window.set_generating(False)
@@ -691,6 +1066,36 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 mood=state.mood,
                 session_id=self._session_id,
             )
+
+    # ------------------------------------------------------------------
+    # Synced reveal (TTS + text in sync)
+    # ------------------------------------------------------------------
+
+    def _start_synced_reveal(self, tts_result: Any, response: str, sentiment: str) -> None:
+        """Start word-by-word text reveal synced to TTS duration (GUI thread)."""
+        if not self.window:
+            return
+        duration_ms = getattr(tts_result, "duration_ms", 0)
+        if not duration_ms:
+            # Fallback estimate: ~150 wpm
+            duration_ms = len(response.split()) * 400
+
+        self.window.chat_panel.begin_synced_reveal(
+            response,
+            duration_ms,
+            sentiment,
+            on_complete=lambda: self._finish_synced_reveal(response),
+        )
+
+    def _finish_synced_reveal(self, response: str) -> None:
+        """Finalize after synced reveal completes (GUI thread)."""
+        if not self.window:
+            return
+        self.window.set_generating(False)
+        self._push_dashboard_update()
+        state = self.mood.get_state()
+        if hasattr(self.window, "update_mood_display"):
+            self.window.update_mood_display(state.mood, state.kait_level)
 
     # ------------------------------------------------------------------
     # Voice input
@@ -727,7 +1132,7 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                     text = _voice_recognizer.recognize_whisper(audio, model="base")
                 except Exception:
                     if self.window and _QT_AVAILABLE:
-                        QTimer.singleShot(0, lambda: self.window.add_system_message(
+                        self._post_to_gui(lambda: self.window.add_system_message(
                             "Could not understand audio."
                         ))
                     return
@@ -736,14 +1141,14 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 def _deliver(t=text):
                     self.window.show_status_message(f"Heard: {t[:60]}...", 3000)
                     self.on_user_message(t)
-                QTimer.singleShot(0, _deliver)
+                self._post_to_gui(_deliver)
 
         except Exception as exc:
             log.warning("Voice capture error: %s", exc)
             if self.window and _QT_AVAILABLE:
                 def _err(e=exc):
                     self.window.add_system_message(f"Voice error: {e}")
-                QTimer.singleShot(0, _err)
+                self._post_to_gui(_err)
 
     # ------------------------------------------------------------------
     # Command handling
@@ -907,7 +1312,7 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             except Exception as exc:
                 msg = f"Claude Code failed: {exc}"
             if w and _QT_AVAILABLE:
-                QTimer.singleShot(0, lambda: w.add_system_message(msg))
+                self._post_to_gui(lambda: w.add_system_message(msg))
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1023,15 +1428,33 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         try:
             if self.window and _QT_AVAILABLE and hasattr(self._llm, "chat_stream"):
                 tokens: List[str] = []
-                QTimer.singleShot(0, lambda: self.window.chat_panel.begin_streaming())
+                # Only stream to GUI when TTS is muted (or no TTS).
+                # When TTS is active, we collect tokens silently and
+                # reveal text via synced-reveal after TTS starts.
+                show_live = self._tts_muted or not self._tts
+                if show_live:
+                    self._post_to_gui(lambda: self.window.chat_panel.begin_streaming())
+                token_count = 0
                 for token in self._llm.chat_stream(
                     messages=messages,
                     model=self._model_name,
                     temperature=0.7,
                 ):
                     tokens.append(token)
-                    t = token
-                    QTimer.singleShot(0, lambda tok=t: self.window.chat_panel.append_token(tok))
+                    token_count += 1
+                    if show_live:
+                        t = token
+                        self._post_to_gui(lambda tok=t: self.window.chat_panel.append_token(tok))
+                    # Throttled token counter update (every 5 tokens)
+                    if token_count % 5 == 0:
+                        mon = getattr(self.window, "monitor", None)
+                        if mon:
+                            tc = token_count
+                            self._post_to_gui(lambda c=tc: mon.update_token_count(c))
+                # Final token count update
+                mon = getattr(self.window, "monitor", None)
+                if mon:
+                    self._post_to_gui(lambda c=token_count: mon.update_token_count(c))
                 return "".join(tokens)
             else:
                 result = self._llm.chat(
@@ -1092,7 +1515,9 @@ class KaitController(QObject if _QT_AVAILABLE else object):
             return
 
         if w:
-            w.add_system_message("[Sending to Claude...]")
+            mon = getattr(w, "monitor", None)
+            if mon:
+                self._post_to_gui(lambda: mon.append_feed_entry("\u25B6 Sending to Claude..."))
 
         import json as _json
         messages: List[Dict[str, str]] = [
@@ -1122,15 +1547,17 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         log.info("Escalating to Claude bridge")
         w = self.window
         if w:
-            w.add_system_message("[Escalating to Claude...]")
+            mon = getattr(w, "monitor", None)
+            if mon:
+                self._post_to_gui(lambda: mon.append_feed_entry("\u25B6 Escalating to Claude..."))
             if hasattr(w, "update_model_indicator"):
                 w.update_model_indicator(self._claude.model, "claude")
 
         escalation_system = (
             "You are Kait, a personal AI sidekick. The user's local LLM was "
             "unable to handle this request, so you are providing a cloud-backed "
-            "response. Be helpful, concise, and technically accurate. If the "
-            "request involves coding, provide working code examples."
+            "response. Be conversational, warm, and concise. Technical details "
+            "are shown in the Monitor tab -- keep chat responses human and brief."
         )
 
         import json as _json
@@ -1152,15 +1579,29 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         """Stream a Claude response into the GUI chat panel and return full text."""
         w = self.window
         tokens: List[str] = []
+        show_live = self._tts_muted or not self._tts
+        token_count = 0
 
         try:
-            if w and _QT_AVAILABLE:
-                QTimer.singleShot(0, lambda: w.chat_panel.begin_streaming())
+            if w and _QT_AVAILABLE and show_live:
+                self._post_to_gui(lambda: w.chat_panel.begin_streaming())
             for token in self._claude.chat_stream(messages=messages):
                 tokens.append(token)
-                if w and _QT_AVAILABLE:
+                token_count += 1
+                if w and _QT_AVAILABLE and show_live:
                     t = token
-                    QTimer.singleShot(0, lambda tok=t: w.chat_panel.append_token(tok))
+                    self._post_to_gui(lambda tok=t: w.chat_panel.append_token(tok))
+                # Throttled token counter update (every 5 tokens)
+                if w and token_count % 5 == 0:
+                    mon = getattr(w, "monitor", None)
+                    if mon:
+                        tc = token_count
+                        self._post_to_gui(lambda c=tc: mon.update_token_count(c))
+            # Final token count update
+            if w:
+                mon = getattr(w, "monitor", None)
+                if mon:
+                    self._post_to_gui(lambda c=token_count: mon.update_token_count(c))
         except Exception as exc:
             log.error("Claude streaming failed: %s", exc)
 
@@ -1291,9 +1732,8 @@ class KaitController(QObject if _QT_AVAILABLE else object):
 
             insights = result.get("insights", [])
             if insights and self.window:
-                QTimer.singleShot(0, lambda: self.window.add_system_message(
-                    f"Reflection complete: {insights[0]}"
-                ))
+                msg = f"Reflection complete: {insights[0]}"
+                self._post_to_gui(lambda: self.window.add_system_message(msg))
             log.info("Reflection completed: %d insights", len(insights))
         except Exception as exc:
             log.warning("Reflection error: %s", exc)
@@ -1307,9 +1747,8 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 self.mood.evolve(min(5, new_stage))
                 self._play_sound("evolve")
                 if self.window and _QT_AVAILABLE:
-                    QTimer.singleShot(0, lambda: self.window.add_system_message(
-                        f"EVOLUTION! Kait has reached Stage {new_stage}: {stage_name}!"
-                    ))
+                    evo_msg = f"EVOLUTION! Kait has reached Stage {new_stage}: {stage_name}!"
+                    self._post_to_gui(lambda: self.window.add_system_message(evo_msg))
                 log.info("Evolved to stage %d: %s", new_stage, stage_name)
 
     # ------------------------------------------------------------------
@@ -1336,6 +1775,17 @@ class KaitController(QObject if _QT_AVAILABLE else object):
                 )
                 self.window.dashboard.update_resonance(resonance)
                 self.window.dashboard.update_bank_stats(bank_stats)
+
+            # Push same data to the Monitor tab
+            if hasattr(self.window, "monitor"):
+                self.window.monitor.update_metrics({
+                    "Interactions": metrics.total_interactions,
+                    "Corrections": metrics.corrections_applied,
+                    "Reflections": metrics.reflection_cycles,
+                    "Resonance": f"{resonance:.2f}",
+                    "Evolution": f"Stage {stage['level']} - {stage['name']}",
+                    "Memory": f"{bank_stats.get('interactions', 0)} stored",
+                })
         except Exception as exc:
             log.debug("Dashboard update error: %s", exc)
 
@@ -1427,7 +1877,7 @@ class KaitController(QObject if _QT_AVAILABLE else object):
         self.window.chat_panel.add_message(
             ChatMessage("assistant", greeting, sentiment="positive")
         )
-        if self._tts:
+        if self._tts and not self._tts_muted:
             try:
                 self._tts.speak(greeting)
             except Exception:
@@ -1547,6 +1997,10 @@ class KaitController(QObject if _QT_AVAILABLE else object):
 
         # Stop background services if we started them
         self._stop_background_services()
+
+        # Always stop the matrix worker on app shutdown, even if this
+        # instance didn't originally start it.
+        self._stop_matrix_worker()
 
         self._shutdown_event.set()
         log.info("Kait shutdown complete.")

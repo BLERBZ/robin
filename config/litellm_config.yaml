@@ -1,0 +1,58 @@
+# LiteLLM proxy configuration for Kait universal cloud gateway.
+#
+# LiteLLM provides:
+# - Unified OpenAI-compatible API for 100+ providers
+# - Response caching (reduces cost and latency)
+# - Cost tracking per model/call
+# - Automatic retry and fallback
+#
+# Documentation: docs/litellm-integration.md
+# Port: 4000 (configurable via KAIT_LITELLM_PORT)
+#
+# Start: python -m litellm --config config/litellm_config.yaml --port 4000
+
+model_list:
+  # Claude models (default cloud provider)
+  - model_name: claude-default
+    litellm_params:
+      model: anthropic/claude-sonnet-4-20250514
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-fast
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-strong
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # OpenAI models
+  - model_name: openai-default
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: openai-fast
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+# Caching: local in-memory cache with 300s TTL
+litellm_settings:
+  cache: true
+  cache_params:
+    type: local
+    ttl: 300
+
+  # Retry on failure
+  num_retries: 2
+  request_timeout: 120
+
+  # Cost tracking
+  success_callback: ["log_raw_request_response"]
+
+# General settings
+general_settings:
+  master_key: os.environ/KAIT_LITELLM_MASTER_KEY

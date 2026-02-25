@@ -170,7 +170,7 @@ async def run(once: bool = False) -> None:
         return
 
     # Sidekick instance (headless, no avatar GUI, no auto-services)
-    sidekick = KaitSidekick(avatar_gui=False, auto_services=False)
+    sidekick = KaitSidekick(auto_services=False)
     logger.info("KaitSidekick initialised (headless)")
 
     # Ensure LLM is available
@@ -185,9 +185,18 @@ async def run(once: bool = False) -> None:
         try:
             # process_message is synchronous (runs LLM etc.), so offload
             # to a thread to avoid blocking the async event loop.
-            response = await asyncio.to_thread(sidekick.process_message, body)
-            await bridge.send_notice(room_id, response)
+            meta = json.dumps({"room_id": room_id, "sender": sender})
+            result = await asyncio.to_thread(
+                sidekick.process_message, body,
+                source="matrix", source_meta=meta,
+            )
+            await bridge.send_notice(room_id, result["response"])
             messages_processed += 1
+            logger.info(
+                "Reply sent (%.0fms, ~%d tokens)",
+                result.get("elapsed_ms", 0),
+                result.get("est_tokens", 0),
+            )
         except Exception as exc:
             logger.error("Failed to process/reply: %s", exc)
             try:

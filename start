@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Usage: ./start kait [options]
-#   Launches the Kait AI sidekick in terminal mode.
+#   Launches the Kait AI sidekick (PyQt dark GUI).
 #   Background services (kaitd, bridge, pulse, scheduler, watchdog)
 #   start automatically — no extra terminals needed.
 #
-#   ./start kait                      # Terminal mode (interactive)
-#   ./start gui                       # GUI mode (PyQt dark UI)
+#   ./start kait                      # GUI mode (PyQt dark UI)
+#   ./start kait --cli                # Terminal-only mode
 #   ./start kait --tts-backend elevenlabs  # Use ElevenLabs TTS
 #   ./start kait --no-tts             # Disable TTS
 #   ./start kait --no-services        # Skip background services
+#   ./start matrix                    # Matrix worker only (separate terminal)
 
 set -euo pipefail
 
@@ -29,34 +30,99 @@ else
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Load .env to read KAIT_MATRIX_ENABLED (without exporting everything)
+# ---------------------------------------------------------------------------
+_read_env_var() {
+    local key="$1"
+    local env_file="$SCRIPT_DIR/.env"
+    if [ -f "$env_file" ]; then
+        # Extract value: skip comments, match KEY=value, strip quotes
+        local val
+        val=$(grep -E "^${key}=" "$env_file" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^["'\''"]//;s/["'\''"]$//' | xargs)
+        echo "$val"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Open the Matrix worker in a separate terminal window (macOS)
+# ---------------------------------------------------------------------------
+_launch_matrix_terminal() {
+    local venv_activate=""
+    if [ -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
+        venv_activate="source '$SCRIPT_DIR/.venv/bin/activate' && "
+    fi
+
+    local cmd="${venv_activate}cd '$SCRIPT_DIR' && python3 matrix_worker.py; echo ''; echo '[Matrix worker exited — press any key to close]'; read -n1"
+
+    # Prefer iTerm2 if available, fall back to Terminal.app
+    if osascript -e 'tell application "System Events" to (name of processes) contains "iTerm2"' 2>/dev/null | grep -q true; then
+        osascript <<ITERM
+tell application "iTerm"
+    activate
+    set newWindow to (create window with default profile)
+    tell current session of newWindow
+        set name to "Kait Matrix Worker"
+        write text "$cmd"
+    end tell
+end tell
+ITERM
+    else
+        osascript <<TERM
+tell application "Terminal"
+    do script "$cmd"
+    set custom title of front window to "Kait Matrix Worker"
+    activate
+end tell
+TERM
+    fi
+}
+
 case "${1:-}" in
     kait)
         shift
-        exec "$PYTHON" "$SCRIPT_DIR/kait_ai_sidekick.py" "$@"
-        ;;
-    gui)
-        shift || true
+
+        # Auto-launch Matrix worker in a separate terminal if enabled
+        matrix_enabled=$(_read_env_var "KAIT_MATRIX_ENABLED")
+        no_services=false
+        for arg in "$@"; do
+            if [ "$arg" = "--no-services" ]; then
+                no_services=true
+            fi
+        done
+
+        matrix_lower=$(echo "$matrix_enabled" | tr '[:upper:]' '[:lower:]')
+        if [ "$no_services" = false ] && [[ "$matrix_lower" =~ ^(true|1|yes)$ ]]; then
+            echo "[kait] Opening Matrix worker in separate terminal..."
+            _launch_matrix_terminal &
+        fi
+
         exec "$PYTHON" "$SCRIPT_DIR/kait_sidekick.py" "$@"
+        ;;
+    matrix)
+        # Run the Matrix worker directly in this terminal
+        echo "[kait] Starting Matrix worker..."
+        exec "$PYTHON" "$SCRIPT_DIR/matrix_worker.py"
         ;;
     "")
         echo "Usage:"
-        echo "  start kait [options]   Terminal sidekick mode"
-        echo "  start gui  [options]   GUI sidekick mode (PyQt)"
+        echo "  start kait [options]   Launch Kait sidekick (GUI)"
+        echo "  start matrix           Launch Matrix worker standalone"
         echo ""
-        echo "Terminal options:"
+        echo "Options:"
+        echo "  --cli                  Terminal-only mode (no GUI)"
         echo "  --tts-backend <name>   TTS backend: auto|elevenlabs|openai|piper|say"
         echo "  --voice <name>         TTS voice name/ID"
         echo "  --no-tts               Disable text-to-speech"
         echo "  --no-services          Skip background services"
-        echo "  --stop-services-on-exit  Stop services on exit"
-        echo "  --daemon               Run in daemon mode"
+        echo "  --onboard              Force onboarding wizard"
         echo "  --status               Show evolution status"
         echo "  --check                Run pre-flight diagnostics"
         exit 1
         ;;
     *)
         echo "Unknown target: $1"
-        echo "Usage: start kait|gui [options]"
+        echo "Usage: start kait [options] | start matrix"
         exit 1
         ;;
 esac

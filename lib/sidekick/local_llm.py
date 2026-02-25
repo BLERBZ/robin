@@ -28,6 +28,7 @@ import urllib.request
 from typing import Any, Dict, Generator, List, Optional
 
 from lib.diagnostics import log_debug
+from lib.llm_observability import observed
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -36,6 +37,13 @@ from lib.diagnostics import log_debug
 _OLLAMA_HOST = os.getenv("KAIT_OLLAMA_HOST", "localhost")
 _OLLAMA_PORT = int(os.getenv("KAIT_OLLAMA_PORT", "11434"))
 _OLLAMA_BASE = f"http://{_OLLAMA_HOST}:{_OLLAMA_PORT}"
+
+# Olla proxy support: when enabled, route through Olla for load balancing
+_OLLA_ENABLED = os.getenv("KAIT_OLLA_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+if _OLLA_ENABLED:
+    _OLLA_HOST = os.getenv("KAIT_OLLA_HOST", "localhost")
+    _OLLA_PORT = int(os.getenv("KAIT_OLLA_PORT", "11435"))
+    _OLLAMA_BASE = f"http://{_OLLA_HOST}:{_OLLA_PORT}"
 
 _HEALTH_TIMEOUT_S = 5
 _GENERATE_TIMEOUT_S = 120
@@ -333,6 +341,42 @@ class OllamaClient:
             return self._default_model
         return self.detect_best_model()
 
+    def _try_smaller_model(self) -> Optional[str]:
+        """Try to switch to a smaller model when current model fails (e.g. OOM).
+
+        Walks _MODEL_PREFERENCE downward from current model.
+        Returns the new model name, or None if no smaller model available.
+        """
+        current = self._default_model or self._cached_best_model
+        if not current:
+            return None
+
+        # Find current position in preference list
+        try:
+            idx = _MODEL_PREFERENCE.index(current)
+        except ValueError:
+            # Current model not in preference list; try the smallest
+            if _MODEL_PREFERENCE:
+                smaller = _MODEL_PREFERENCE[-1]
+                if smaller != current:
+                    self._default_model = smaller
+                    log_debug(_LOG_TAG, f"Switching to smaller model: {smaller} (current {current} not in preference list)", None)
+                    return smaller
+            return None
+
+        # Try next smaller model
+        for i in range(idx + 1, len(_MODEL_PREFERENCE)):
+            candidate = _MODEL_PREFERENCE[i]
+            models = self.list_models()
+            available_names = {m.get("name", "") for m in models}
+            if candidate in available_names:
+                self._default_model = candidate
+                log_debug(_LOG_TAG, f"Switching to smaller model: {candidate} (was {current})", None)
+                return candidate
+
+        return None
+
+    @observed("ollama")
     def generate(
         self,
         prompt: str,
@@ -371,6 +415,7 @@ class OllamaClient:
 
         return response_text.strip()
 
+    @observed("ollama")
     def generate_stream(
         self,
         prompt: str,
@@ -420,6 +465,7 @@ class OllamaClient:
     # Chat (multi-turn)
     # ------------------------------------------------------------------
 
+    @observed("ollama")
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -457,6 +503,7 @@ class OllamaClient:
 
         return message.get("content", "").strip()
 
+    @observed("ollama")
     def chat_stream(
         self,
         messages: List[Dict[str, str]],
@@ -518,6 +565,7 @@ class OllamaClient:
     # Embeddings
     # ------------------------------------------------------------------
 
+    @observed("ollama")
     def embed(
         self,
         text: str,

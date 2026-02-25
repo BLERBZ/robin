@@ -49,6 +49,37 @@ async def api_status():
     except Exception:
         pass
     result["kaitd_healthy"] = kaitd_healthy
+
+    # LLM provider status
+    try:
+        from lib.llm_observability import get_observer
+        obs = get_observer()
+        if obs.enabled:
+            result["llm_providers"] = obs.get_provider_stats(window_s=60)
+    except Exception:
+        pass
+
+    # LLM provider status
+    llm_providers = {}
+    try:
+        from lib.sidekick.llm_gateway import get_llm_gateway
+        gw = get_llm_gateway()
+        llm_providers = gw.health()
+    except Exception:
+        pass
+
+    # Circuit breaker status
+    circuit_breakers = {}
+    try:
+        from lib.llm_circuit_breaker import get_circuit_breaker_registry
+        cb_reg = get_circuit_breaker_registry()
+        circuit_breakers = cb_reg.get_status()
+    except Exception:
+        pass
+
+    result["llm_providers"] = llm_providers
+    result["circuit_breakers"] = circuit_breakers
+
     return JSONResponse(result)
 
 
@@ -133,6 +164,25 @@ async def api_ops():
     except Exception:
         pass
     return JSONResponse({"services": services})
+
+
+# ── /api/llm — LLM call observability metrics ────────────────────
+@app.get("/api/llm")
+async def api_llm():
+    try:
+        from lib.llm_observability import get_observer
+        observer = get_observer()
+        if not observer.enabled:
+            return JSONResponse({"enabled": False})
+        return JSONResponse({
+            "enabled": True,
+            "summary": observer.get_summary(window_s=300),
+            "provider_stats": observer.get_provider_stats(window_s=300),
+            "recent_calls": observer.get_recent(limit=20),
+            "lifetime": observer.get_lifetime_stats(),
+        })
+    except Exception:
+        return JSONResponse({"enabled": False, "error": "observer not available"})
 
 
 # ── Dashboard HTML ─────────────────────────────────────────────────
@@ -385,6 +435,24 @@ body {
       </div>
     </div>
 
+    <!-- LLM Infrastructure -->
+    <div class="card" id="llm-card">
+      <div class="card-title">LLM Infrastructure</div>
+      <div id="llm-providers">
+        <div class="svc-row"><div class="svc-dot" id="llm-local"></div><span class="svc-name">local (ollama)</span></div>
+        <div class="svc-row"><div class="svc-dot" id="llm-claude"></div><span class="svc-name">claude</span></div>
+        <div class="svc-row"><div class="svc-dot" id="llm-openai"></div><span class="svc-name">openai</span></div>
+        <div class="svc-row"><div class="svc-dot" id="llm-litellm"></div><span class="svc-name">litellm</span></div>
+      </div>
+      <div style="margin-top:8px">
+        <div class="stat-row"><span class="stat-label">calls (5min)</span><span class="stat-val" id="llm-calls">--</span></div>
+        <div class="stat-row"><span class="stat-label">error rate</span><span class="stat-val" id="llm-errors">--</span></div>
+        <div class="stat-row"><span class="stat-label">p50 latency</span><span class="stat-val" id="llm-p50">--</span></div>
+        <div class="stat-row"><span class="stat-label">p99 latency</span><span class="stat-val" id="llm-p99">--</span></div>
+        <div class="stat-row"><span class="stat-label">cost (5min)</span><span class="stat-val gold" id="llm-cost">--</span></div>
+      </div>
+    </div>
+
     <!-- North Star -->
     <div class="card">
       <div class="card-title">North Star</div>
@@ -509,13 +577,52 @@ function pollIntelligence() {
   }).catch(() => {});
 }
 
+function pollLLM() {
+  fetchJSON('/api/llm').then(d => {
+    if (!d || !d.enabled) return;
+    const s = d.summary || {};
+    const el = (id) => document.getElementById(id);
+    el('llm-calls').textContent = s.total_calls || 0;
+    const errRate = s.error_rate || 0;
+    const errEl = el('llm-errors');
+    errEl.textContent = (errRate * 100).toFixed(1) + '%';
+    errEl.className = 'stat-val' + (errRate > 0.25 ? ' orange' : errRate > 0 ? '' : ' green');
+    el('llm-p50').textContent = s.p50_latency_ms ? s.p50_latency_ms.toFixed(0) + 'ms' : '--';
+    el('llm-p99').textContent = s.p99_latency_ms ? s.p99_latency_ms.toFixed(0) + 'ms' : '--';
+    el('llm-cost').textContent = s.total_cost_usd ? '$' + s.total_cost_usd.toFixed(4) : '--';
+  }).catch(() => {});
+
+  // Update provider dots from /api/status data
+  if (statusData && statusData.llm_providers) {
+    const lp = statusData.llm_providers;
+    for (const [key, info] of Object.entries(lp)) {
+      const dot = document.getElementById('llm-' + key);
+      if (!dot) continue;
+      dot.className = 'svc-dot';
+      if (info.available) dot.classList.add('up');
+      else dot.classList.add('down');
+    }
+    // Check circuit breakers for warn state
+    if (statusData.circuit_breakers) {
+      for (const [name, cb] of Object.entries(statusData.circuit_breakers)) {
+        const dotId = name === 'ollama' ? 'llm-local' : 'llm-' + name;
+        const dot = document.getElementById(dotId);
+        if (dot && cb.state === 'open') { dot.className = 'svc-dot down'; }
+        else if (dot && cb.state === 'half_open') { dot.className = 'svc-dot warn'; }
+      }
+    }
+  }
+}
+
 // Staggered start
 setTimeout(pollStatus, 200);
 setTimeout(pollQueue, 800);
 setTimeout(pollIntelligence, 1500);
+setTimeout(pollLLM, 2000);
 setInterval(pollStatus, 5000);
 setInterval(pollQueue, 5000);
 setInterval(pollIntelligence, 10000);
+setInterval(pollLLM, 5000);
 
 // ── Update Timestamp ───────────────────────────
 function fmtTime(ts) {

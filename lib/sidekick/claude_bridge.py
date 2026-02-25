@@ -1,5 +1,10 @@
 """Anthropic Claude API bridge for Kait AI Sidekick.
 
+.. deprecated::
+    Direct use of ClaudeClient is deprecated. Use ``LLMGateway`` from
+    ``lib.sidekick.llm_gateway`` for all new LLM calls. This module remains
+    functional as a fallback provider within the gateway.
+
 Provides a ClaudeClient that mirrors OllamaClient's chat()/chat_stream()
 interface, enabling seamless escalation from local LLM to Claude when the
 local model hits its limits or the user explicitly requests Claude.
@@ -15,7 +20,7 @@ Usage:
 
 Environment variables:
     ANTHROPIC_API_KEY   - API key (also checks CLAUDE_API_KEY)
-    KAIT_CLAUDE_MODEL   - Override default model (default: claude-sonnet-4-20250514)
+    KAIT_CLAUDE_MODEL   - Override default model (default: claude-opus-4-6)
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 from lib.diagnostics import log_debug
+from lib.llm_observability import observed
 
 # ---------------------------------------------------------------------------
 # .env loader (mirrors advisory_synthesizer._load_repo_env_value)
@@ -70,7 +76,7 @@ def _load_repo_env_value(*keys: str) -> Optional[str]:
 # Configuration
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_MODEL = "claude-opus-4-6"
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
 _LOG_TAG = "claude_bridge"
@@ -179,6 +185,7 @@ class ClaudeClient:
     # Chat (blocking)
     # ------------------------------------------------------------------
 
+    @observed("claude")
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -279,6 +286,7 @@ class ClaudeClient:
     # Chat streaming
     # ------------------------------------------------------------------
 
+    @observed("claude")
     def chat_stream(
         self,
         messages: List[Dict[str, str]],

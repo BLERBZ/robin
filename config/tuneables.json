@@ -436,6 +436,14 @@
     "base_score_floor": 0.30,
     "max_total_boost": 0.42
   },
+  "llm_gateway": {
+    "olla_enabled": false,
+    "litellm_enabled": false,
+    "local_timeout_s": 120,
+    "cloud_timeout_s": 120,
+    "max_retries": 2,
+    "cost_alert_threshold_usd": 1.0
+  },
   "bridge_worker": {
     "enabled": true
   },
@@ -460,6 +468,15 @@
     "explore_tuning_max": 200,
     "explore_decisions_max": 200,
     "explore_feedback_max": 200
+  },
+  "vault_viewer": {
+    "enabled": true,
+    "kait_brain_path": "",
+    "github_mindmap_path": "",
+    "watcher_debounce_ms": 2000,
+    "max_display_files": 500,
+    "auto_refresh_on_tab_switch": true,
+    "graph_build_delay_ms": 3000
   },
   "production_gates": {
     "enforce_meta_ralph_quality_band": true,

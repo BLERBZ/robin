@@ -1,0 +1,42 @@
+# Olla configuration for Kait local LLM load balancing.
+#
+# Olla is a lightweight Ollama-compatible proxy that provides:
+# - Multi-backend load balancing (priority or round-robin)
+# - Automatic failover between Ollama instances
+# - Per-backend circuit breakers
+# - Health check monitoring
+#
+# Documentation: docs/olla-integration.md
+# Port: 11435 (configurable via KAIT_OLLA_PORT)
+
+listen: ":11435"
+
+# Backend Ollama instances (priority order: first = highest priority)
+backends:
+  - name: primary
+    url: "http://localhost:11434"
+    priority: 1
+
+  # Uncomment to add additional Ollama instances:
+  # - name: secondary
+  #   url: "http://localhost:11436"
+  #   priority: 2
+  # - name: remote
+  #   url: "http://gpu-server:11434"
+  #   priority: 3
+
+# Load balancing strategy: priority | round-robin
+# "priority" always tries the highest-priority backend first (recommended for single-instance setups).
+# "round-robin" distributes requests evenly across healthy backends.
+strategy: priority
+
+# Circuit breaker: trips open after N consecutive failures, recovers after timeout.
+circuit_breaker:
+  threshold: 3
+  timeout_seconds: 60
+
+# Health checking: Olla pings each backend at this interval.
+health_check:
+  interval_seconds: 10
+  path: "/api/tags"
+  timeout_seconds: 5

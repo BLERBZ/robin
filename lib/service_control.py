@@ -415,6 +415,13 @@ def _is_service_ready(name: str, bridge_stale_s: int = 90) -> bool:
     if name == "watchdog":
         pid = _read_pid("watchdog")
         return _pid_alive(pid)
+    if name == "olla":
+        olla_host = os.environ.get("KAIT_OLLA_HOST", "localhost")
+        olla_port = os.environ.get("KAIT_OLLA_PORT", "11435")
+        return _http_ok(f"http://{olla_host}:{olla_port}/healthz", timeout=2.0)
+    if name == "litellm":
+        litellm_port = os.environ.get("KAIT_LITELLM_PORT", "4000")
+        return _http_ok(f"http://localhost:{litellm_port}/health", timeout=2.0)
     return False
 
 
@@ -502,6 +509,25 @@ def _service_cmds(
             str(watchdog_interval),
         ],
     }
+    # Optional LLM infrastructure services
+    olla_enabled = os.environ.get("KAIT_OLLA_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    if olla_enabled:
+        olla_bin = Path.home() / ".kait" / "bin" / "olla"
+        olla_config = ROOT_DIR / "config" / "olla.yaml"
+        if olla_bin.exists() and olla_config.exists():
+            cmds["olla"] = [str(olla_bin), "serve", "--config", str(olla_config)]
+
+    litellm_enabled = os.environ.get("KAIT_LITELLM_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    if litellm_enabled:
+        litellm_config = ROOT_DIR / "config" / "litellm_config.yaml"
+        litellm_port = os.environ.get("KAIT_LITELLM_PORT", "4000")
+        if litellm_config.exists():
+            cmds["litellm"] = [
+                sys.executable, "-m", "litellm",
+                "--config", str(litellm_config),
+                "--port", litellm_port,
+            ]
+
     if include_pulse:
         try:
             cmds["pulse"] = _get_pulse_command()
@@ -611,6 +637,16 @@ def service_status(bridge_stale_s: int = 90, include_pulse_probe: bool = True) -
             "pid": matrix_pid,
             "process_running": matrix_process_running,
             "heartbeat_fresh": matrix_heartbeat_fresh,
+        },
+        "olla": {
+            "running": _is_service_ready("olla"),
+            "enabled": os.environ.get("KAIT_OLLA_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on"),
+            "pid": _read_pid("olla"),
+        },
+        "litellm": {
+            "running": _is_service_ready("litellm"),
+            "enabled": os.environ.get("KAIT_LITELLM_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on"),
+            "pid": _read_pid("litellm"),
         },
         "log_dir": str(_log_dir()),
     }
@@ -747,7 +783,7 @@ def ensure_ollama(timeout_s: float = 10.0) -> str:
 
 def stop_services() -> dict[str, str]:
     results: dict[str, str] = {}
-    for name in ["watchdog", "pulse", "matrix_worker", "scheduler", "bridge_worker", "kaitd"]:
+    for name in ["watchdog", "pulse", "matrix_worker", "scheduler", "bridge_worker", "kaitd", "olla", "litellm"]:
         pid = _read_pid(name)
         patterns = {
             "kaitd": [["-m kaitd"], ["kaitd.py"]],
@@ -756,6 +792,8 @@ def stop_services() -> dict[str, str]:
             "pulse": _pulse_process_patterns(),
             "watchdog": [["-m kait_watchdog"], ["kait_watchdog.py"], ["scripts/watchdog.py"]],
             "matrix_worker": [["matrix_worker.py"]],
+            "olla": [["olla", "serve"]],
+            "litellm": [["-m litellm"], ["litellm", "--config"]],
         }.get(name, [])
 
         killed_any = False

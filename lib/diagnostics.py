@@ -207,3 +207,34 @@ def setup_component_logging(component: str) -> Optional[Path]:
 
     _LOG_SETUP.add(component)
     return log_file
+
+
+def log_llm_routing(
+    provider: str,
+    model: str,
+    latency_ms: float,
+    tokens: int = 0,
+    cost_usd: float = 0.0,
+    success: bool = True,
+) -> None:
+    """Structured logging for LLM routing decisions.
+
+    Emits a JSON line to stderr when KAIT_DEBUG is enabled,
+    useful for tracing routing behavior in production.
+    """
+    if not debug_enabled():
+        return
+    import json as _json
+    entry = {
+        "event": "llm_routing",
+        "provider": provider,
+        "model": model,
+        "latency_ms": round(latency_ms, 1),
+        "tokens": tokens,
+        "cost_usd": round(cost_usd, 6),
+        "success": success,
+    }
+    try:
+        sys.stderr.write(f"[KAIT][llm_routing] {_json.dumps(entry)}\n")
+    except Exception:
+        pass

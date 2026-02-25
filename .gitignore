@@ -53,6 +53,7 @@ telegram_token.txt
 .spark/
 .kait/
 .learnings/
+_skills-map/
 *.db
 
 # optcheck local data (keep config tracked)
@@ -156,9 +157,10 @@ AGENTS.md
 SOUL.md
 TOOLS.md
 
-# Any file with local Windows paths in name
+# Any file with local Windows paths or Obsidian vaults
 C?UsersUSER*
 C\\Users\\*
+*Obsidian Vault*
 *test_output.txt
 *test_out.txt
 *test_err.txt

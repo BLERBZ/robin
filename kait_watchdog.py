@@ -682,6 +682,80 @@ def main() -> None:
         except Exception as e:
             _log(f"openclaw_tailer check failed: {e}")
 
+        # LLM infrastructure health checks
+        _llm_watchdog_enabled = os.environ.get("KAIT_LLM_WATCHDOG_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        if _llm_watchdog_enabled:
+            try:
+                # Check LLM observability metrics
+                from lib.llm_observability import get_observer
+                observer = get_observer()
+                if observer.enabled:
+                    summary = observer.get_summary(window_s=300)
+                    if summary["total_calls"] >= 5:
+                        error_rate = summary["error_rate"]
+                        if error_rate > 0.5:
+                            _log(f"LLM error rate critical: {error_rate:.0%} ({summary['error_count']}/{summary['total_calls']} calls in 5min)")
+                            # Try to restart Ollama if it's the primary failure source
+                            try:
+                                provider_stats = observer.get_provider_stats(window_s=300)
+                                ollama_stats = provider_stats.get("ollama", {})
+                                if ollama_stats.get("error_rate", 0) > 0.5:
+                                    from lib.service_control import ensure_ollama
+                                    result = ensure_ollama()
+                                    _log(f"Ollama restart attempt: {result}")
+                            except Exception as e:
+                                _log(f"Ollama restart failed: {e}")
+                        elif error_rate > 0.25:
+                            _log(f"LLM error rate elevated: {error_rate:.0%}")
+
+                # Log circuit breaker states
+                try:
+                    from lib.llm_circuit_breaker import get_circuit_breaker_registry
+                    cb_reg = get_circuit_breaker_registry()
+                    if cb_reg.enabled:
+                        for name, cb in cb_reg.get_all().items():
+                            if cb.state.value != "closed":
+                                _log(f"Circuit breaker [{name}]: {cb.state.value} (failures={cb.failure_count})")
+                except Exception:
+                    pass
+
+                # Check Olla proxy health (if enabled)
+                olla_enabled = os.environ.get("KAIT_OLLA_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+                if olla_enabled:
+                    olla_host = os.environ.get("KAIT_OLLA_HOST", "localhost")
+                    olla_port = os.environ.get("KAIT_OLLA_PORT", "11435")
+                    olla_health_url = f"http://{olla_host}:{olla_port}/healthz"
+                    if not _http_ok(olla_health_url, timeout=2.0):
+                        _log("Olla proxy unhealthy")
+                        if not args.no_restart and _can_restart(state, "olla"):
+                            # Try to restart Olla
+                            olla_bin = Path.home() / ".kait" / "bin" / "olla"
+                            olla_config = KAIT_DIR / "config" / "olla.yaml"
+                            if olla_bin.exists() and olla_config.exists():
+                                if _start_process("olla", [str(olla_bin), "serve", "--config", str(olla_config)]):
+                                    _record_restart(state, "olla")
+                                    _log("Olla proxy restarted")
+
+                # Check LiteLLM proxy health (if enabled)
+                litellm_enabled = os.environ.get("KAIT_LITELLM_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+                if litellm_enabled:
+                    litellm_port = os.environ.get("KAIT_LITELLM_PORT", "4000")
+                    litellm_health_url = f"http://localhost:{litellm_port}/health"
+                    if not _http_ok(litellm_health_url, timeout=2.0):
+                        _log("LiteLLM proxy unhealthy")
+                        if not args.no_restart and _can_restart(state, "litellm"):
+                            litellm_config = KAIT_DIR / "config" / "litellm_config.yaml"
+                            if litellm_config.exists():
+                                if _start_process(
+                                    "litellm",
+                                    [sys.executable, "-m", "litellm", "--config", str(litellm_config), "--port", litellm_port],
+                                ):
+                                    _record_restart(state, "litellm")
+                                    _log("LiteLLM proxy restarted")
+
+            except Exception as e:
+                _log(f"LLM health check failed: {e}")
+
         # queue pressure warning
         try:
             queue_count, backlog = _queue_counts()

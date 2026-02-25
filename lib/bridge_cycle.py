@@ -720,6 +720,14 @@ def run_bridge_cycle(
     except Exception:
         pass
 
+    # Feed LLM infrastructure insights to cognitive learner
+    try:
+        from lib.llm_learning_bridge import get_llm_learning_bridge
+        llm_bridge = get_llm_learning_bridge()
+        llm_bridge.analyze_and_learn()
+    except Exception:
+        pass  # LLM learning bridge is non-critical
+
     return stats
 
 

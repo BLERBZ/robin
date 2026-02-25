@@ -16,7 +16,10 @@ import subprocess
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+import time as _time
+
 from lib.diagnostics import log_debug
+from lib.llm_observability import get_observer, LLMCallRecord
 
 # Rate limiting: track calls to avoid hammering
 _CALL_LOG_FILE = Path.home() / ".kait" / "llm_calls.json"
@@ -87,10 +90,25 @@ def ask_claude(
 
     claude_path = _get_claude_path()
 
+    start = _time.monotonic()
     if os.name == "nt":
-        return _call_claude_windows(claude_path, prompt, system_prompt, timeout_s)
+        result = _call_claude_windows(claude_path, prompt, system_prompt, timeout_s)
     else:
-        return _call_claude_unix(claude_path, prompt, system_prompt, timeout_s)
+        result = _call_claude_unix(claude_path, prompt, system_prompt, timeout_s)
+    elapsed_ms = (_time.monotonic() - start) * 1000
+
+    observer = get_observer()
+    if observer.enabled:
+        observer.record(LLMCallRecord(
+            provider="claude_cli",
+            model="claude-cli",
+            method="ask_claude",
+            latency_ms=round(elapsed_ms, 1),
+            success=result is not None,
+            error="" if result else "no response",
+        ))
+
+    return result
 
 
 def _call_claude_windows(

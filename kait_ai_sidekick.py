@@ -80,6 +80,16 @@ try:
     _CLAUDE_BRIDGE_AVAILABLE = True
 except ImportError:
     _CLAUDE_BRIDGE_AVAILABLE = False
+try:
+    from lib.sidekick.openai_bridge import OpenAIClient, get_openai_client
+    _OPENAI_BRIDGE_AVAILABLE = True
+except ImportError:
+    _OPENAI_BRIDGE_AVAILABLE = False
+try:
+    from lib.sidekick.llm_router import LLMRouter, LLMProvider, RoutingDecision, get_llm_router
+    _LLM_ROUTER_AVAILABLE = True
+except ImportError:
+    _LLM_ROUTER_AVAILABLE = False
 from lib.sidekick.agents import AgentOrchestrator, AgentResult
 from lib.sidekick.mood_tracker import MoodTracker
 from lib.sidekick.resonance import ResonanceEngine, SentimentAnalyzer
@@ -344,6 +354,37 @@ class KaitSidekick:
                     log.info("Claude bridge loaded but no API key configured")
             except Exception as exc:
                 log.warning("Claude bridge init failed: %s", exc)
+
+        # OpenAI bridge (optional cloud provider)
+        self._openai: Optional["OpenAIClient"] = None
+        if _OPENAI_BRIDGE_AVAILABLE:
+            try:
+                self._openai = get_openai_client()
+                if self._openai.available():
+                    log.info("OpenAI bridge available (model=%s)", self._openai.model)
+                else:
+                    log.info("OpenAI bridge loaded but no API key or SDK")
+            except Exception as exc:
+                log.warning("OpenAI bridge init failed: %s", exc)
+
+        # Intelligent LLM router (optional)
+        self._router: Optional["LLMRouter"] = None
+        if _LLM_ROUTER_AVAILABLE:
+            try:
+                self._router = get_llm_router()
+                if self._router.ready:
+                    log.info(
+                        "LLM router active (type=%s, threshold=%.5f, strong=%s)",
+                        self._router.router_type,
+                        self._router.threshold,
+                        self._router.strong_provider.value,
+                    )
+                elif self._router.enabled:
+                    log.info("LLM router enabled but RouteLLM not ready (pip install routellm)")
+                else:
+                    log.info("LLM router loaded (disabled — set KAIT_ROUTER_ENABLED=true)")
+            except Exception as exc:
+                log.warning("LLM router init failed: %s", exc)
 
         # Claude Code autonomous operations (optional)
         self._claude_code: Optional[Any] = None
@@ -1177,6 +1218,18 @@ class KaitSidekick:
             self._show_claude_status()
             return True
 
+        if cmd.startswith("/openai "):
+            self._handle_openai_command(stripped[8:].strip())
+            return True
+
+        if cmd == "/openai":
+            self._show_openai_status()
+            return True
+
+        if cmd == "/router":
+            self._show_router_status()
+            return True
+
         if cmd.startswith("/correct "):
             self._handle_correction(stripped[9:].strip())
             return True
@@ -1256,6 +1309,9 @@ class KaitSidekick:
             ("/web", "Show web browser status"),
             ("/claude <msg>", "Send message directly to Claude API"),
             ("/claude", "Show Claude bridge status"),
+            ("/openai <msg>", "Send message directly to OpenAI"),
+            ("/openai", "Show OpenAI bridge status"),
+            ("/router", "Show LLM router status and providers"),
             ("/history", "Show recent interaction history"),
             ("/corrections", "Show learned corrections"),
             ("/personality", "Show personality traits"),
@@ -1484,6 +1540,7 @@ class KaitSidekick:
             mood=self.mood.get_state().mood,
             sentiment_score=sentiment_score,
             session_id=self._session_id,
+            source="cli",
         )
 
         # 12. Update conversation history
@@ -1519,12 +1576,12 @@ class KaitSidekick:
     # ------------------------------------------------------------------
     # Headless message processing (for Matrix / external bridges)
     # ------------------------------------------------------------------
-    def process_message(self, user_input: str) -> str:
-        """Process a user message and return the response text.
+    def process_message(self, user_input: str, *, source: str = "cli", source_meta: Optional[str] = None) -> dict:
+        """Process a user message and return a result dict.
 
         Runs the same pipeline as :meth:`_process_interaction` (sentiment,
-        agents, LLM, resonance, evolution) but returns the response string
-        instead of printing it or updating the graphical avatar / TTS.
+        agents, LLM, resonance, evolution) but returns a dict instead of
+        printing to the terminal or updating the graphical avatar / TTS.
 
         This is the entry-point used by external bridges (e.g.
         :class:`MatrixBridge`) that need a programmatic response.
@@ -1533,10 +1590,15 @@ class KaitSidekick:
         ----------
         user_input:
             The incoming message text.
+        source:
+            Origin tag for the interaction (``"cli"``, ``"matrix"``, etc.).
+        source_meta:
+            Optional JSON string with source-specific metadata.
 
         Returns
         -------
-        The generated response string.
+        dict with keys: response, elapsed_ms, est_tokens, sentiment,
+        session_id, interaction_count.
         """
         with self._lock:
             self._interaction_count += 1
@@ -1633,6 +1695,8 @@ class KaitSidekick:
             mood=self.mood.get_state().mood,
             sentiment_score=sentiment_score,
             session_id=self._session_id,
+            source=source,
+            source_meta=source_meta,
         )
 
         # 12. Update conversation history
@@ -1663,7 +1727,14 @@ class KaitSidekick:
             sentiment_label,
             quality,
         )
-        return response
+        return {
+            "response": response,
+            "elapsed_ms": elapsed_ms,
+            "est_tokens": max(1, (len(user_input) + len(response)) // 4),
+            "sentiment": sentiment_label,
+            "session_id": self._session_id,
+            "interaction_count": self._interaction_count,
+        }
 
     # ------------------------------------------------------------------
     # Tool Args Extraction
@@ -1877,39 +1948,106 @@ class KaitSidekick:
         file_context: Optional[str] = None,
         web_content: Optional[str] = None,
     ) -> str:
-        """Generate a response using the local LLM or fallback.
+        """Generate a response using intelligent routing or legacy fallback.
 
-        v1.2: Now supports token streaming, dynamic correction injection,
-        mandatory creativity directives, and behavior rules.
+        v1.2: Token streaming, dynamic correction injection, creativity, rules.
         v1.3: Retries with progressively smaller context windows on failure.
         v2.1: Web browsing content injection.
+        v3.0: Intelligent LLM routing via RouteLLM.
         """
-        if not self._llm_available or not self._llm:
-            # Try Claude bridge before falling back to canned response
-            claude_resp = self._escalate_to_claude(user_input, tool_output=tool_output)
-            if claude_resp is not None:
-                return claude_resp
-            return self._fallback_response(user_input, tool_output)
-
         # Build enriched system prompt with corrections + creativity + rules
         enriched_prompt = self._system_prompt
         enriched_prompt += self._build_correction_directive()
         enriched_prompt += self._build_creativity_directive(creativity_result)
         enriched_prompt += self._build_behavior_rules_directive()
 
+        # Common kwargs for message building
+        msg_kwargs = dict(
+            enriched_prompt=enriched_prompt,
+            prompt_fragments=prompt_fragments,
+            tool_output=tool_output,
+            context=context,
+            file_context=file_context,
+            web_content=web_content,
+        )
+
+        # --- LLM Gateway fast-path (unified routing with circuit breakers) ---
+        try:
+            from lib.sidekick.llm_gateway import get_llm_gateway
+            gw = get_llm_gateway()
+            if gw.available_providers():
+                messages = self._build_llm_messages(
+                    user_input, history_window=10, **msg_kwargs,
+                )
+                result = gw.chat(
+                    messages,
+                    system=enriched_prompt,
+                    temperature=CFG.LLM_TEMPERATURE,
+                    max_tokens=CFG.LLM_MAX_TOKENS,
+                )
+                if result is not None:
+                    return result
+        except Exception:
+            pass  # Fall through to legacy provider switching
+
+        # Get routing decision
+        decision = self._get_routing_decision(user_input)
+
+        if decision:
+            log.info("Router: %s → %s", decision.reason, decision.provider.value)
+
+        # Try primary provider
+        providers_to_try = []
+        if decision:
+            providers_to_try.append(decision.provider)
+            providers_to_try.extend(decision.fallback_chain)
+        else:
+            # No router — legacy order
+            if self._llm_available and self._llm:
+                providers_to_try.append(LLMProvider.LOCAL if _LLM_ROUTER_AVAILABLE else None)
+            if self._claude and self._claude.available():
+                providers_to_try.append(LLMProvider.CLAUDE if _LLM_ROUTER_AVAILABLE else None)
+            if self._openai and self._openai.available():
+                providers_to_try.append(LLMProvider.OPENAI if _LLM_ROUTER_AVAILABLE else None)
+
+        # If router types aren't available, use legacy path
+        if not _LLM_ROUTER_AVAILABLE or not providers_to_try or any(p is None for p in providers_to_try):
+            return self._generate_response_legacy(
+                user_input, msg_kwargs=msg_kwargs, tool_output=tool_output,
+            )
+
+        # Try each provider in order
+        for provider in providers_to_try:
+            result = self._try_provider(provider, user_input, msg_kwargs)
+            if result is not None:
+                return result
+
+        return self._fallback_response(user_input, tool_output)
+
+    def _generate_response_legacy(
+        self,
+        user_input: str,
+        *,
+        msg_kwargs: Dict[str, Any],
+        tool_output: Optional[Dict] = None,
+    ) -> str:
+        """Legacy generation path: local-first with Claude escalation on failure."""
+        if not self._llm_available or not self._llm:
+            claude_resp = self._escalate_to_claude(user_input, tool_output=tool_output)
+            if claude_resp is not None:
+                return claude_resp
+            # Try OpenAI before canned fallback
+            openai_resp = self._try_openai_provider(user_input, msg_kwargs)
+            if openai_resp is not None:
+                return openai_resp
+            return self._fallback_response(user_input, tool_output)
+
         # Retry with progressively smaller history windows
         history_windows = [10, 5, 2, 0]
 
         for i, window in enumerate(history_windows):
             messages = self._build_llm_messages(
-                user_input,
-                enriched_prompt=enriched_prompt,
-                prompt_fragments=prompt_fragments,
-                tool_output=tool_output,
-                context=context,
-                history_window=window,
-                file_context=file_context,
-                web_content=web_content,
+                user_input, history_window=window, **msg_kwargs,
             )
             try:
                 if CFG.STREAM_TOKENS:
@@ -1931,11 +2069,114 @@ class KaitSidekick:
                 else:
                     log.error("LLM generation failed on all retries: %s", exc)
 
-        # Ollama failed entirely — try Claude bridge before canned fallback
         claude_resp = self._escalate_to_claude(user_input, tool_output=tool_output)
         if claude_resp is not None:
             return claude_resp
+        openai_resp = self._try_openai_provider(user_input, msg_kwargs)
+        if openai_resp is not None:
+            return openai_resp
         return self._fallback_response(user_input, tool_output)
+
+    def _get_routing_decision(self, user_input: str) -> Optional["RoutingDecision"]:
+        """Get a routing decision from the LLM router, or None for legacy."""
+        if not _LLM_ROUTER_AVAILABLE or not self._router:
+            return None
+        if not self._router.enabled:
+            return None
+        try:
+            return self._router.route(
+                user_input,
+                local_available=self._llm_available and self._llm is not None,
+                claude_available=bool(self._claude and self._claude.available()),
+                openai_available=bool(self._openai and self._openai.available()),
+            )
+        except Exception as exc:
+            log.warning("Router decision failed, using legacy path: %s", exc)
+            return None
+
+    def _try_provider(
+        self,
+        provider: "LLMProvider",
+        user_input: str,
+        msg_kwargs: Dict[str, Any],
+    ) -> Optional[str]:
+        """Try generating a response from a specific provider."""
+        if provider == LLMProvider.LOCAL:
+            return self._try_local_provider(user_input, msg_kwargs)
+        elif provider == LLMProvider.CLAUDE:
+            return self._try_claude_provider(user_input, msg_kwargs)
+        elif provider == LLMProvider.OPENAI:
+            return self._try_openai_provider(user_input, msg_kwargs)
+        return None
+
+    def _try_local_provider(
+        self,
+        user_input: str,
+        msg_kwargs: Dict[str, Any],
+    ) -> Optional[str]:
+        """Try Ollama with retry-with-smaller-windows logic."""
+        if not self._llm_available or not self._llm:
+            return None
+
+        history_windows = [10, 5, 2, 0]
+        for i, window in enumerate(history_windows):
+            messages = self._build_llm_messages(
+                user_input, history_window=window, **msg_kwargs,
+            )
+            try:
+                if CFG.STREAM_TOKENS:
+                    return self._stream_response(messages)
+                else:
+                    response = self._llm.chat(
+                        messages=messages,
+                        model=self._model_name,
+                        temperature=CFG.LLM_TEMPERATURE,
+                    )
+                    return response.strip()
+            except Exception as exc:
+                next_window = history_windows[i + 1] if i + 1 < len(history_windows) else None
+                if next_window is not None:
+                    log.warning(
+                        "Local LLM failed with %d history turns, retrying with %d... (%s)",
+                        window, next_window, exc,
+                    )
+                else:
+                    log.error("Local LLM failed on all retries: %s", exc)
+        return None
+
+    def _try_claude_provider(
+        self,
+        user_input: str,
+        msg_kwargs: Dict[str, Any],
+    ) -> Optional[str]:
+        """Try Claude API — reuses existing _stream_claude_response."""
+        if not self._claude or not self._claude.available():
+            return None
+
+        log.info("Routing to Claude")
+        _kait_print("[Routing to Claude...]", _C.SYSTEM)
+
+        messages = self._build_llm_messages(
+            user_input, history_window=5, **msg_kwargs,
+        )
+        return self._stream_claude_response(messages)
+
+    def _try_openai_provider(
+        self,
+        user_input: str,
+        msg_kwargs: Dict[str, Any],
+    ) -> Optional[str]:
+        """Try OpenAI API — mirrors Claude streaming pattern."""
+        if not self._openai or not self._openai.available():
+            return None
+
+        log.info("Routing to OpenAI")
+        _kait_print("[Routing to OpenAI...]", _C.SYSTEM)
+
+        messages = self._build_llm_messages(
+            user_input, history_window=5, **msg_kwargs,
+        )
+        return self._stream_openai_response(messages)
 
     def _stream_response(self, messages: List[Dict[str, str]]) -> str:
         """Stream tokens to the terminal and return full text.
@@ -2132,6 +2373,128 @@ class KaitSidekick:
         sys.stdout.flush()
 
         return "".join(tokens).strip() if tokens else None
+
+    # ------------------------------------------------------------------
+    # OpenAI Bridge
+    # ------------------------------------------------------------------
+
+    def _show_openai_status(self) -> None:
+        """Display OpenAI bridge status."""
+        if self._openai and self._openai.available():
+            _kait_print(
+                f"  OpenAI bridge: AVAILABLE  |  Model: {self._openai.model}  |  "
+                "API key: configured",
+                _C.SUCCESS,
+            )
+        elif self._openai:
+            _kait_print(
+                "  OpenAI bridge: loaded but no API key or SDK configured.\n"
+                "  Set OPENAI_API_KEY in .env and install: pip install openai",
+                _C.DIM,
+            )
+        else:
+            _kait_print(
+                "  OpenAI bridge: not available (module not loaded).",
+                _C.DIM,
+            )
+
+    def _handle_openai_command(self, message: str) -> None:
+        """Route a /openai <message> command directly to OpenAI."""
+        if not self._openai or not self._openai.available():
+            _kait_print(
+                "  OpenAI bridge not available. Set OPENAI_API_KEY in .env "
+                "and install: pip install openai",
+                _C.ERROR,
+            )
+            return
+
+        _kait_print("[Sending to OpenAI...]", _C.SYSTEM)
+        messages = self._build_llm_messages(
+            message,
+            enriched_prompt=self._system_prompt,
+            history_window=5,
+        )
+        response = self._stream_openai_response(messages)
+        if response:
+            self._conversation_history.append({"role": "user", "content": message})
+            self._conversation_history.append({"role": "assistant", "content": response})
+        else:
+            _kait_print("  OpenAI did not return a response.", _C.ERROR)
+
+    def _stream_openai_response(self, messages: List[Dict[str, str]]) -> Optional[str]:
+        """Stream an OpenAI response to the terminal and return full text."""
+        tokens: List[str] = []
+
+        sys.stdout.write(f"{_C.KAIT}")
+        sys.stdout.flush()
+
+        try:
+            for token in self._openai.chat_stream(messages=messages):
+                tokens.append(token)
+                sys.stdout.write(token)
+                sys.stdout.flush()
+        except Exception as exc:
+            log.error("OpenAI streaming failed: %s", exc)
+
+        sys.stdout.write(f"{_C.RESET}\n")
+        sys.stdout.flush()
+
+        return "".join(tokens).strip() if tokens else None
+
+    # ------------------------------------------------------------------
+    # LLM Router Status
+    # ------------------------------------------------------------------
+
+    def _show_router_status(self) -> None:
+        """Display LLM router and all provider status."""
+        _kait_print("  === LLM Router Status ===", _C.BOLD)
+
+        # Router
+        if self._router and self._router.ready:
+            _kait_print(
+                f"  Router:    ACTIVE  |  Type: {self._router.router_type}  |  "
+                f"Threshold: {self._router.threshold:.5f}  |  "
+                f"Strong: {self._router.strong_provider.value}",
+                _C.SUCCESS,
+            )
+        elif self._router and self._router.enabled:
+            _kait_print(
+                "  Router:    ENABLED but RouteLLM not ready\n"
+                "  Install:   pip install routellm",
+                _C.EVOLVE,
+            )
+        elif self._router:
+            _kait_print(
+                "  Router:    DISABLED (set KAIT_ROUTER_ENABLED=true in .env)",
+                _C.DIM,
+            )
+        else:
+            _kait_print("  Router:    not loaded (module unavailable)", _C.DIM)
+
+        print()
+        _kait_print("  === Provider Status ===", _C.BOLD)
+
+        # Local (Ollama)
+        if self._llm_available and self._llm:
+            _kait_print(f"  Local:     ONLINE   |  Model: {self._model_name}", _C.SUCCESS)
+        else:
+            _kait_print("  Local:     OFFLINE  |  Start: ollama serve", _C.DIM)
+
+        # Claude
+        if self._claude and self._claude.available():
+            _kait_print(f"  Claude:    ONLINE   |  Model: {self._claude.model}", _C.SUCCESS)
+        elif self._claude:
+            _kait_print("  Claude:    NO KEY   |  Set ANTHROPIC_API_KEY in .env", _C.DIM)
+        else:
+            _kait_print("  Claude:    NOT LOADED", _C.DIM)
+
+        # OpenAI
+        if self._openai and self._openai.available():
+            _kait_print(f"  OpenAI:    ONLINE   |  Model: {self._openai.model}", _C.SUCCESS)
+        elif self._openai:
+            _kait_print("  OpenAI:    NO KEY   |  Set OPENAI_API_KEY in .env", _C.DIM)
+        else:
+            _kait_print("  OpenAI:    NOT LOADED", _C.DIM)
 
     # ------------------------------------------------------------------
     # Claude Code Operations

@@ -19,6 +19,8 @@ KAITD_PORT = _env_int("KAITD_PORT", 8787)
 PULSE_PORT = _env_int("KAIT_PULSE_PORT", 8765)
 MIND_PORT = _env_int("KAIT_MIND_PORT", 8080)
 MATRIX_WORKER_PORT = _env_int("KAIT_MATRIX_WORKER_PORT", 8769)
+OLLA_PORT = _env_int("KAIT_OLLA_PORT", 11435)
+LITELLM_PORT = _env_int("KAIT_LITELLM_PORT", 4000)
 
 
 def _host(host: str | None) -> str:
@@ -33,9 +35,13 @@ KAITD_URL = build_url(KAITD_PORT)
 PULSE_URL = build_url(PULSE_PORT)
 MIND_URL = build_url(MIND_PORT)
 MATRIX_WORKER_URL = build_url(MATRIX_WORKER_PORT)
+OLLA_URL = build_url(OLLA_PORT, os.environ.get("KAIT_OLLA_HOST"))
+LITELLM_URL = build_url(LITELLM_PORT)
 
 KAITD_HEALTH_URL = f"{KAITD_URL}/health"
 PULSE_STATUS_URL = f"{PULSE_URL}/api/status"
 PULSE_UI_URL = f"{PULSE_URL}/"
 PULSE_DOCS_URL = f"{PULSE_URL}/docs"
 MIND_HEALTH_URL = f"{MIND_URL}/health"
+OLLA_HEALTH_URL = f"{OLLA_URL}/health"
+LITELLM_HEALTH_URL = f"{LITELLM_URL}/health"
